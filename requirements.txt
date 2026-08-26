@@ -1,0 +1,18 @@
+# --- Core backend (verified working together) ---
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+python-multipart>=0.0.9
+pydantic>=2.9.0
+pypdf>=4.3.0
+chromadb>=0.5.0
+scikit-learn>=1.5.0     # powers the offline TF-IDF fallback embedder (no API key needed)
+
+# --- Frontend ---
+streamlit>=1.38.0
+requests>=2.32.0
+
+# --- Optional: enable higher-quality embeddings / generation ---
+# Uncomment whichever backends you plan to use (set via EMBEDDING_BACKEND / LLM_BACKEND env vars)
+# openai>=1.40.0                 # for EMBEDDING_BACKEND=openai and/or LLM_BACKEND=openai
+# anthropic>=0.34.0              # for LLM_BACKEND=anthropic
+# sentence-transformers>=3.0.0   # for EMBEDDING_BACKEND=local (runs fully on your own machine)
