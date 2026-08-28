@@ -42,10 +42,22 @@ def generate_answer(question: str, hits: list[dict], backend: str | None = None)
     if not hits:
         return "I couldn't find anything relevant to that question in the uploaded documents."
 
-    if backend == "anthropic":
-        return _generate_anthropic(question, hits)
-    if backend == "openai":
-        return _generate_openai(question, hits)
+    try:
+        if backend == "anthropic":
+            return _generate_anthropic(question, hits)
+        if backend == "openai":
+            return _generate_openai(question, hits)
+    except Exception as exc:
+        # BUG FIX: originally an API error (missing/invalid key, rate limit,
+        # network hiccup) propagated straight up and crashed the request.
+        # The whole point of the "extractive" mode is graceful degradation,
+        # so fall back to it instead of surfacing a raw 500 to the user.
+        fallback = _generate_extractive(question, hits)
+        return (
+            f"⚠️ {backend.title()} generation failed ({exc}); "
+            f"falling back to extractive mode.\n\n{fallback}"
+        )
+
     return _generate_extractive(question, hits)
 
 
@@ -54,7 +66,7 @@ def _generate_anthropic(question: str, hits: list[dict]) -> str:
     client = anthropic.Anthropic()
     context = _build_context_block(hits)
     message = client.messages.create(
-        model=os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6"),
+        model=os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5"),
         max_tokens=600,
         system=SYSTEM_PROMPT,
         messages=[{
