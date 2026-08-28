@@ -1,50 +1,56 @@
 """
-frontend/app.py
-----------------
-Streamlit UI for DocuMind. Talks to the FastAPI backend over HTTP so the
-two are fully decoupled -- the backend can be deployed separately (e.g.
-behind a client's auth layer) and reused by other clients.
-
-Run (after starting the backend, see README):
-    streamlit run frontend/app.py
+app.py
 """
+
+from __future__ import annotations
 
 import os
 
-import requests
 import streamlit as st
 
-BACKEND_URL = os.environ.get("DOCUMIND_BACKEND_URL", "http://localhost:8000")
+from ingest import ingest_any
+from rag import answer_question
+from vectorstore import VectorStore
 
 st.set_page_config(page_title="DocuMind — Document QA", page_icon="📄", layout="wide")
 
 st.title("📄 DocuMind")
-st.caption("Ask questions about your own documents. Every answer is grounded in — "
-           "and cited back to — the exact source excerpt it came from.")
+st.caption(
+    "Ask questions about your own documents. Every answer is grounded in — "
+    "and cited back to — the exact source excerpt it came from."
+)
+
 
 # ---------------------------------------------------------------------
-# Backend connectivity check
+# Vector store: created once per (embedding backend) and reused across
+# reruns/questions instead of being rebuilt on every interaction. This
+# matters a lot for the "local" embedding backend (loads a multi-hundred-
+# MB transformer model) and still helps "tfidf"/"openai".
 # ---------------------------------------------------------------------
-def backend_healthy() -> bool:
-    try:
-        r = requests.get(f"{BACKEND_URL}/health", timeout=3)
-        return r.ok
-    except requests.RequestException:
-        return False
+@st.cache_resource(show_spinner="Setting up the document index...")
+def get_store(embedding_backend: str) -> VectorStore:
+    return VectorStore(backend=embedding_backend)
 
 
-if not backend_healthy():
-    st.error(
-        f"⚠️ Can't reach the DocuMind backend at `{BACKEND_URL}`. "
-        "Start it with `uvicorn main:app --reload --port 8000` from the `backend/` folder."
-    )
-    st.stop()
+embedding_backend = os.environ.get("EMBEDDING_BACKEND", "tfidf").lower()
+store = get_store(embedding_backend)
+
+available_llm_backends = ["extractive"]
+if os.environ.get("ANTHROPIC_API_KEY"):
+    available_llm_backends.append("anthropic")
+if os.environ.get("OPENAI_API_KEY"):
+    available_llm_backends.append("openai")
+
+default_llm_backend = os.environ.get("LLM_BACKEND", "extractive").lower()
+if default_llm_backend not in available_llm_backends:
+    default_llm_backend = "extractive"
 
 # ---------------------------------------------------------------------
 # Sidebar: document management
 # ---------------------------------------------------------------------
 with st.sidebar:
     st.header("📚 Document library")
+    st.caption(f"Embedding backend: `{embedding_backend}`")
 
     uploaded_files = st.file_uploader(
         "Upload PDFs or text files", type=["pdf", "txt", "md"], accept_multiple_files=True,
@@ -52,36 +58,52 @@ with st.sidebar:
 
     if uploaded_files and st.button("⬆️ Ingest documents", type="primary"):
         with st.spinner("Reading, chunking, and embedding your documents..."):
-            files_payload = [
-                ("files", (f.name, f.getvalue(), "application/octet-stream"))
-                for f in uploaded_files
-            ]
-            resp = requests.post(f"{BACKEND_URL}/documents/upload", files=files_payload)
-        if resp.ok:
-            for item in resp.json():
-                st.success(f"✅ {item['filename']}: {item['chunks_added']} chunks indexed")
-        else:
-            st.error(f"Upload failed: {resp.text}")
+            for f in uploaded_files:
+                try:
+                    chunks = ingest_any(f.getvalue(), f.name)
+                    n = store.add_chunks(chunks)
+                    st.success(f"✅ {f.name}: {n} chunks indexed")
+                except ValueError as e:
+                    st.error(f"❌ {f.name}: {e}")
+                except Exception as e:  # noqa: BLE001 - surface any parse/index failure to the user
+                    st.error(f"❌ {f.name}: unexpected error — {e}")
 
     st.divider()
 
-    docs_resp = requests.get(f"{BACKEND_URL}/documents")
-    if docs_resp.ok:
-        docs_data = docs_resp.json()
-        st.metric("Chunks indexed", docs_data["total_chunks"])
-        if docs_data["sources"]:
-            st.write("**Indexed documents:**")
-            for src in docs_data["sources"]:
-                st.write(f"- {src}")
-        else:
-            st.info("No documents indexed yet.")
+    st.metric("Chunks indexed", store.stats()["total_chunks"])
+    sources = store.list_sources()
+    if sources:
+        st.write("**Indexed documents:**")
+        for src in sources:
+            st.write(f"- {src}")
+    else:
+        st.info("No documents indexed yet.")
 
     if st.button("🗑️ Clear all documents"):
-        requests.delete(f"{BACKEND_URL}/documents")
+        store.reset()
         st.rerun()
 
     st.divider()
     top_k = st.slider("Excerpts to retrieve per question", 1, 10, 4)
+
+    if len(available_llm_backends) > 1:
+        llm_backend = st.selectbox(
+            "Answer generation",
+            available_llm_backends,
+            index=available_llm_backends.index(default_llm_backend),
+            help=(
+                "'extractive' needs no API key and just returns the most "
+                "relevant sentences verbatim. 'anthropic'/'openai' send the "
+                "retrieved excerpts to that provider's chat model."
+            ),
+        )
+    else:
+        llm_backend = "extractive"
+        st.caption(
+            "Answer generation: `extractive` (no ANTHROPIC_API_KEY / "
+            "OPENAI_API_KEY set — set one as an environment variable to "
+            "enable LLM-written answers)."
+        )
 
 # ---------------------------------------------------------------------
 # Main: chat-style Q&A
@@ -89,18 +111,23 @@ with st.sidebar:
 if "history" not in st.session_state:
     st.session_state.history = []
 
+
+def _render_citations(citations: list[dict]) -> None:
+    with st.expander(f"📎 {len(citations)} source excerpt(s)"):
+        for c in citations:
+            page_info = f", page {c['page']}" if c.get("page") not in (None, -1) else ""
+            st.markdown(f"**{c['source']}{page_info}**")
+            st.caption(c["excerpt"])
+            st.divider()
+
+
 for turn in st.session_state.history:
     with st.chat_message("user"):
         st.write(turn["question"])
     with st.chat_message("assistant"):
         st.write(turn["answer"])
         if turn["citations"]:
-            with st.expander(f"📎 {len(turn['citations'])} source excerpt(s)"):
-                for c in turn["citations"]:
-                    page_info = f", page {c['page']}" if c.get("page") not in (None, -1) else ""
-                    st.markdown(f"**{c['source']}{page_info}**")
-                    st.caption(c["excerpt"])
-                    st.divider()
+            _render_citations(turn["citations"])
 
 question = st.chat_input("Ask a question about your documents...")
 
@@ -110,22 +137,20 @@ if question:
         st.write(question)
 
     with st.chat_message("assistant"):
-        with st.spinner("Searching documents and generating an answer..."):
-            resp = requests.post(f"{BACKEND_URL}/ask", json={"question": question, "top_k": top_k})
-        if resp.ok:
-            data = resp.json()
-            st.write(data["answer"])
-            if data["citations"]:
-                with st.expander(f"📎 {len(data['citations'])} source excerpt(s)"):
-                    for c in data["citations"]:
-                        page_info = f", page {c['page']}" if c.get("page") not in (None, -1) else ""
-                        st.markdown(f"**{c['source']}{page_info}**")
-                        st.caption(c["excerpt"])
-                        st.divider()
-            st.session_state.history[-1] = {
-                "question": question, "answer": data["answer"], "citations": data["citations"],
-            }
+        if store.stats()["total_chunks"] == 0:
+            error_msg = "No documents have been uploaded yet. Add some in the sidebar first."
+            st.warning(error_msg)
+            st.session_state.history[-1]["answer"] = error_msg
         else:
-            error_msg = resp.json().get("detail", resp.text)
-            st.error(error_msg)
-            st.session_state.history[-1]["answer"] = f"Error: {error_msg}"
+            with st.spinner("Searching documents and generating an answer..."):
+                try:
+                    result = answer_question(store, question, top_k=top_k, llm_backend=llm_backend)
+                except Exception as e:  # noqa: BLE001 - never let a retrieval/generation error crash the UI
+                    result = {"answer": f"Something went wrong answering that: {e}", "citations": []}
+
+            st.write(result["answer"])
+            if result["citations"]:
+                _render_citations(result["citations"])
+            st.session_state.history[-1] = {
+                "question": question, "answer": result["answer"], "citations": result["citations"],
+            }
