@@ -4,9 +4,9 @@ rag.py
 Orchestrates the retrieval-augmented generation flow:
   question -> retrieve top-k chunks -> build cited context -> generate answer
 
-Kept separate from main.py (the API layer) so this logic can be
-unit-tested and reused by the CLI/Streamlit frontend without going
-through HTTP if desired.
+Kept separate from app.py/api.py (the interface layers) so this logic can
+be unit-tested and reused by the Streamlit app, a CLI, or an optional
+HTTP API without duplicating it.
 """
 
 from __future__ import annotations
@@ -19,7 +19,6 @@ def answer_question(store: VectorStore, question: str, top_k: int = 4,
                      llm_backend: str | None = None) -> dict:
     hits = store.query(question, top_k=top_k)
     answer = generate_answer(question, hits, backend=llm_backend)
-
     citations = [
         {
             "source": h["source"],
@@ -29,5 +28,4 @@ def answer_question(store: VectorStore, question: str, top_k: int = 4,
         }
         for h in hits
     ]
-
     return {"question": question, "answer": answer, "citations": citations}
