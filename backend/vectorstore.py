@@ -10,7 +10,7 @@ Thin wrapper around ChromaDB that:
     be fit once and reused consistently between ingestion and query time
 
 Swapping the vector store itself (e.g. to FAISS, Pinecone, Weaviate) only
-requires reimplementing this one module -- nothing in rag.py or main.py
+requires reimplementing this one module -- nothing in rag.py or app.py
 needs to change, because they only depend on this file's public functions.
 """
 
@@ -83,20 +83,36 @@ class VectorStore:
         # TF-IDF must be (re)fit on the *full* accumulated corpus, not just
         # the new batch, or old vectors become incomparable to new ones.
         if isinstance(self.embedder, TfidfEmbedder):
-            existing = self.collection.get(include=["documents"])
-            corpus = (existing.get("documents") or []) + documents
+            # BUG FIX: this used to call collection.get(include=["documents"])
+            # which -- because `include` was given explicitly -- silently
+            # dropped metadatas from the response. Every re-embed of the
+            # existing corpus then re-added those chunks with an empty {}
+            # metadata dict, permanently wiping the source/page citation
+            # info for every previously-ingested document the moment a
+            # *second* file was uploaded. Both keys must be requested.
+            existing = self.collection.get(include=["documents", "metadatas"])
+            existing_ids = existing.get("ids") or []
+            existing_docs = existing.get("documents") or []
+            existing_metas = existing.get("metadatas") or []
+
+            corpus = existing_docs + documents
             self.embedder.vectorizer.fit(corpus)
             self.embedder._fitted = True
             self._save_tfidf_state()
-            # re-embed everything so old and new chunks share one vocabulary
-            if existing.get("ids"):
-                self.collection.delete(ids=existing["ids"])
-                self.collection.add(
-                    ids=existing["ids"], documents=existing["documents"],
-                    metadatas=existing.get("metadatas") or [{} for _ in existing["ids"]],
+
+            # Re-embed everything so old and new chunks share one vocabulary.
+            if existing_ids:
+                self.collection.delete(ids=existing_ids)
+                self.collection.upsert(
+                    ids=existing_ids, documents=existing_docs, metadatas=existing_metas,
                 )
 
-        self.collection.add(ids=ids, documents=documents, metadatas=metadatas)
+        # BUG FIX: the original code used collection.add(), which raises on
+        # duplicate IDs. Re-uploading a file with the same name (a common,
+        # expected user action -- re-ingesting an updated version of a doc)
+        # would crash instead of just refreshing that file's chunks. upsert
+        # makes ingestion idempotent.
+        self.collection.upsert(ids=ids, documents=documents, metadatas=metadatas)
         self._save_tfidf_state()
         return len(chunks)
 
@@ -132,3 +148,14 @@ class VectorStore:
         )
         if TFIDF_STATE_PATH.exists():
             TFIDF_STATE_PATH.unlink()
+        # BUG FIX: the in-memory TF-IDF vectorizer previously stayed
+        # "fitted" on the old (now-deleted) vocabulary after a reset. A
+        # query issued before any new document was re-ingested would
+        # silently embed against a stale vocabulary instead of failing
+        # loudly or behaving consistently.
+        if isinstance(self.embedder, TfidfEmbedder):
+            from sklearn.feature_extraction.text import TfidfVectorizer
+            self.embedder.vectorizer = TfidfVectorizer(
+                max_features=self.embedder.dimension, stop_words="english"
+            )
+            self.embedder._fitted = False
