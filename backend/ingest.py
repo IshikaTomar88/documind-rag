@@ -3,7 +3,7 @@ ingest.py
 ---------
 Document ingestion: reads PDFs (and plain text/markdown) off disk or from
 raw bytes, cleans the extracted text, and splits it into overlapping
-token-ish chunks ready for embedding.
+word-count chunks ready for embedding.
 
 Chunking strategy
 ------------------
@@ -12,7 +12,7 @@ character count, because word-based chunking degrades much more
 gracefully across different document layouts (two-column PDFs, tables,
 etc.) than a fixed character window does. The overlap exists so that a
 sentence or fact split across the boundary of two chunks doesn't lose
-its context in either chunk — this materially improves retrieval recall
+its context in either chunk -- this materially improves retrieval recall
 on real documents and is one of the most common things naive RAG
 tutorials skip.
 """
@@ -29,9 +29,9 @@ from pypdf import PdfReader
 @dataclass
 class Chunk:
     text: str
-    source: str          # original filename
-    page: int | None      # page number, 1-indexed (None if not applicable)
-    chunk_index: int      # position of this chunk within the document
+    source: str            # original filename
+    page: int | None       # page number, 1-indexed (None if not applicable)
+    chunk_index: int       # position of this chunk within the document
 
 
 # --------------------------------------------------------------------------
@@ -82,11 +82,19 @@ def chunk_text(
         context window can hold several retrieved chunks at once.
     overlap_words: how many words are repeated at the start of the next
         chunk, so a fact sitting on a chunk boundary is fully present in
-        at least one chunk.
+        at least one chunk. Must be strictly less than chunk_size_words,
+        or the sliding step would collapse to a crawl of near-duplicate
+        chunks (fixed below rather than left as a silent footgun).
     """
     words = text.split()
     if not words:
         return []
+
+    if overlap_words >= chunk_size_words:
+        # Clamp instead of raising -- callers may pass configurable values
+        # (e.g. from a UI slider) and a hard crash mid-ingestion is worse
+        # than a sane, logged fallback.
+        overlap_words = max(chunk_size_words // 4, 0)
 
     chunks: list[Chunk] = []
     step = max(chunk_size_words - overlap_words, 1)
