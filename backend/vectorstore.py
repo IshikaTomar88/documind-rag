@@ -76,20 +76,26 @@ class VectorStore:
         ids = [f"{c.source}::p{c.page}::{c.chunk_index}" for c in chunks]
         documents = [c.text for c in chunks]
         metadatas = [
-            {"source": c.source, "page": c.page or -1, "chunk_index": c.chunk_index}
+            {
+                "source": c.source,
+                "page": c.page if c.page is not None else -1,
+                "chunk_index": c.chunk_index,
+            }
             for c in chunks
         ]
 
-        # TF-IDF must be (re)fit on the *full* accumulated corpus, not just
-        # the new batch, or old vectors become incomparable to new ones.
         if isinstance(self.embedder, TfidfEmbedder):
-            # BUG FIX: this used to call collection.get(include=["documents"])
-            # which -- because `include` was given explicitly -- silently
-            # dropped metadatas from the response. Every re-embed of the
-            # existing corpus then re-added those chunks with an empty {}
-            # metadata dict, permanently wiping the source/page citation
-            # info for every previously-ingested document the moment a
-            # *second* file was uploaded. Both keys must be requested.
+            # TF-IDF must be (re)fit on the *full* accumulated corpus, not
+            # just the new batch, or old vectors become incomparable to
+            # new ones (different vocabulary => different vector meaning).
+            #
+            # BUG FIX: the original call was
+            #   self.collection.get(include=["documents"])
+            # which does NOT return metadata (Chroma only returns what you
+            # ask for in `include`). Every re-fit was silently wiping the
+            # source/page/chunk_index of every previously-indexed chunk,
+            # breaking citations for anything uploaded before the most
+            # recent batch. We now explicitly request both.
             existing = self.collection.get(include=["documents", "metadatas"])
             existing_ids = existing.get("ids") or []
             existing_docs = existing.get("documents") or []
@@ -100,18 +106,15 @@ class VectorStore:
             self.embedder._fitted = True
             self._save_tfidf_state()
 
-            # Re-embed everything so old and new chunks share one vocabulary.
+            # Re-embed every existing chunk under the newly fitted
+            # vocabulary so old and new vectors stay comparable.
             if existing_ids:
-                self.collection.delete(ids=existing_ids)
-                self.collection.upsert(
-                    ids=existing_ids, documents=existing_docs, metadatas=existing_metas,
-                )
+                self.collection.upsert(ids=existing_ids, documents=existing_docs, metadatas=existing_metas)
 
-        # BUG FIX: the original code used collection.add(), which raises on
-        # duplicate IDs. Re-uploading a file with the same name (a common,
-        # expected user action -- re-ingesting an updated version of a doc)
-        # would crash instead of just refreshing that file's chunks. upsert
-        # makes ingestion idempotent.
+        # BUG FIX: this was `self.collection.add(...)`. Chroma's `add()`
+        # raises if any id already exists, so re-uploading a file you'd
+        # already indexed (same filename => same ids) crashed the app.
+        # `upsert()` is idempotent: same id updates in place, new id inserts.
         self.collection.upsert(ids=ids, documents=documents, metadatas=metadatas)
         self._save_tfidf_state()
         return len(chunks)
@@ -146,16 +149,10 @@ class VectorStore:
             embedding_function=_ChromaEmbeddingAdapter(self.embedder),
             metadata={"hnsw:space": "cosine"},
         )
-        if TFIDF_STATE_PATH.exists():
-            TFIDF_STATE_PATH.unlink()
-        # BUG FIX: the in-memory TF-IDF vectorizer previously stayed
-        # "fitted" on the old (now-deleted) vocabulary after a reset. A
-        # query issued before any new document was re-ingested would
-        # silently embed against a stale vocabulary instead of failing
-        # loudly or behaving consistently.
         if isinstance(self.embedder, TfidfEmbedder):
-            from sklearn.feature_extraction.text import TfidfVectorizer
-            self.embedder.vectorizer = TfidfVectorizer(
+            self.embedder.vectorizer = type(self.embedder.vectorizer)(
                 max_features=self.embedder.dimension, stop_words="english"
             )
             self.embedder._fitted = False
+            if TFIDF_STATE_PATH.exists():
+                TFIDF_STATE_PATH.unlink()
