@@ -28,9 +28,12 @@ st.markdown('<p class="sub-title">Upload business contracts, technical manuals, 
 with st.sidebar:
     st.header("🔑 Enterprise Configuration")
     
-    # Auto-load from Streamlit Secrets or let user input manually
+    # Check Streamlit secrets first, otherwise provide input field
     default_key = st.secrets.get("GEMINI_API_KEY", "") if "GEMINI_API_KEY" in st.secrets else ""
-    api_key = st.text_input("Google Gemini API Key", value=default_key, type="password", help="Enter your Gemini API key.")
+    api_key_input = st.text_input("Google Gemini API Key", value=default_key, type="password", help="Enter your Gemini API key here.")
+    
+    # Clean up any accidental spaces around the key
+    api_key = api_key_input.strip() if api_key_input else ""
     
     st.divider()
     st.header("📁 Client Document Vault")
@@ -68,10 +71,11 @@ with st.sidebar:
 # Main Execution Space
 # ---------------------------------------------------------------------
 if not uploaded_files:
-    st.info("👈 Enter your Gemini API key and upload your client documents in the sidebar to activate the enterprise engine.")
+    st.info("👈 Enter your Gemini API key in the sidebar and upload your client documents to activate the engine.")
 else:
+    # Explicit validation check to prevent blank key errors
     if not api_key:
-        st.warning("⚠️ Please provide your Google Gemini API key in the sidebar to enable the intelligence core.")
+        st.warning("⚠️ Please paste your Google Gemini API key into the sidebar text box above to enable AI processing.")
         st.stop()
 
     # Consolidate text corpus cleanly with clear file boundaries
@@ -83,7 +87,7 @@ else:
     if user_query:
         with st.spinner("Processing document corpus through Gemini intelligence core..."):
             try:
-                # Initialize official Google GenAI client
+                # Initialize official Google GenAI client with validated key
                 client = genai.Client(api_key=api_key)
                 
                 system_instruction = (
@@ -103,7 +107,7 @@ else:
                 CLIENT REQUEST: {user_query}
                 """
 
-                # Call Gemini 2.5 Flash model for robust standard-key compatibility
+                # Call Gemini 2.5 Flash model
                 response = client.models.generate_content(
                     model='gemini-2.5-flash',
                     contents=prompt
