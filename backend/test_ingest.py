@@ -1,13 +1,8 @@
 """
 test_ingest.py
 --------------
-Run with: pytest backend/test_ingest.py -v
+Run with: pytest test_ingest.py -v
 """
-
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent))
 
 from ingest import chunk_text, clean_text
 
