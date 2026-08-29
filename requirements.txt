@@ -1,8 +1,8 @@
 # Core — required to run `streamlit run app.py` with defaults
 # (EMBEDDING_BACKEND=tfidf, LLM_BACKEND=extractive => no API keys needed)
-streamlit>=1.40.0
-pypdf>=4.0.0
-google-genai>=1.0.0
+streamlit>=1.38
+pypdf>=4.0
+google-genai>=0.3
 chromadb>=0.5
 scikit-learn>=1.4
 
