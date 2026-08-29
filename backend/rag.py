@@ -1,12 +1,5 @@
 """
 rag.py
-------
-Orchestrates the retrieval-augmented generation flow:
-  question -> retrieve top-k chunks -> build cited context -> generate answer
-
-Kept separate from app.py/api.py (the interface layers) so this logic can
-be unit-tested and reused by the Streamlit app, a CLI, or an optional
-HTTP API without duplicating it.
 """
 
 from __future__ import annotations
