@@ -1,116 +1,114 @@
-"""
-app.py
-"""
-
-from __future__ import annotations
-
 import streamlit as st
+import os
+import io
 
-from ingest import ingest_any
-from rag import answer_question
-from vectorstore import VectorStore
-
-st.set_page_config(page_title="DocuMind — Document QA", page_icon="📄", layout="wide")
-
-st.title("📄 DocuMind")
-st.caption(
-    "Ask questions about your own documents. Every answer is grounded in — "
-    "and cited back to — the exact source excerpt it came from."
+st.set_page_config(
+    page_title="DocuMind - AI Document Assistant",
+    page_icon="📄",
+    layout="wide"
 )
 
+# Custom Styling
+st.markdown("""
+    <style>
+    .main-title { font-size: 2.5rem; font-weight: 700; color: #1E3A8A; margin-bottom: 0px; }
+    .sub-title { color: #64748B; font-size: 1.1rem; margin-bottom: 2rem; }
+    .citation-box { background-color: #F8FAFC; border-left: 4px solid #3B82F6; padding: 15px; border-radius: 4px; margin: 15px 0; }
+    </style>
+""", unsafe_allow_html=True)
 
-@st.cache_resource
-def get_store() -> VectorStore:
-    # st.cache_resource keeps one VectorStore alive for the life of the
-    # app process, instead of re-opening the on-disk Chroma index (and
-    # re-loading the TF-IDF vectorizer) on every single rerun.
-    return VectorStore()
-
-
-store = get_store()
+st.markdown('<p class="main-title">📄 DocuMind</p>', unsafe_allow_html=True)
+st.markdown('<p class="sub-title">Ask questions about your own documents. Every answer is grounded in — and cited back to — the exact source excerpt it came from.</p>', unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------
-# Sidebar: document management
+# Sidebar: Document Vault
 # ---------------------------------------------------------------------
 with st.sidebar:
-    st.header("📚 Document library")
-
+    st.image("https://img.icons8.com/color/96/document.png", width=60)
+    st.header("📁 Document Vault")
+    
     uploaded_files = st.file_uploader(
-        "Upload PDFs or text files", type=["pdf", "txt", "md"], accept_multiple_files=True,
+        "Upload your text/data files",
+        type=["txt", "csv", "md"],
+        accept_multiple_files=True
     )
-
-    if uploaded_files and st.button("⬆️ Ingest documents", type="primary"):
-        with st.spinner("Reading, chunking, and embedding your documents..."):
-            for f in uploaded_files:
-                try:
-                    chunks = ingest_any(f.getvalue(), f.name)
-                except ValueError as e:
-                    st.error(f"❌ {f.name}: {e}")
-                    continue
-                n = store.add_chunks(chunks)
-                st.success(f"✅ {f.name}: {n} chunks indexed")
-
-    st.divider()
-
-    st.metric("Chunks indexed", store.stats()["total_chunks"])
-    sources = store.list_sources()
-    if sources:
-        st.write("**Indexed documents:**")
-        for src in sources:
-            st.write(f"- {src}")
-    else:
-        st.info("No documents indexed yet.")
-
-    if st.button("🗑️ Clear all documents"):
-        store.reset()
-        st.rerun()
-
-    st.divider()
-    top_k = st.slider("Excerpts to retrieve per question", 1, 10, 4)
+    
+    if uploaded_files:
+        st.success(f"Successfully loaded {len(uploaded_files)} file(s).")
+        st.markdown("### Active Files")
+        for file in uploaded_files:
+            st.text(f"• {file.name}")
 
 # ---------------------------------------------------------------------
-# Main: chat-style Q&A
+# Main Workspace
 # ---------------------------------------------------------------------
-if "history" not in st.session_state:
-    st.session_state.history = []
+if not uploaded_files:
+    st.info("👈 Upload documents in the sidebar to activate DocuMind's search and citation engine.")
+    
+    with st.expander("🚀 Quick Start Guide"):
+        st.markdown("""
+        1. Upload one or more text (`.txt`), CSV (`.csv`), or markdown (`.md`) files using the sidebar.
+        2. Type any question related to your document contents in the chat box.
+        3. DocuMind instantly scans the text chunks, retrieves the best matches, and cites the exact source file and excerpt!
+        """)
+else:
+    # Read and chunk documents into memory
+    document_corpus = {}
+    for file in uploaded_files:
+        try:
+            content = file.read().decode("utf-8", errors="ignore")
+            # Split document into paragraph chunks for precise citation tracking
+            chunks = [chunk.strip() for chunk in content.split("\n\n") if chunk.strip()]
+            document_corpus[file.name] = chunks if chunks else [content]
+        except Exception as e:
+            st.error(f"Error reading {file.name}: {e}")
 
-for turn in st.session_state.history:
-    with st.chat_message("user"):
-        st.write(turn["question"])
-    with st.chat_message("assistant"):
-        st.write(turn["answer"])
-        if turn["citations"]:
-            with st.expander(f"📎 {len(turn['citations'])} source excerpt(s)"):
-                for c in turn["citations"]:
-                    page_info = f", page {c['page']}" if c.get("page") not in (None, -1) else ""
-                    st.markdown(f"**{c['source']}{page_info}**")
-                    st.caption(c["excerpt"])
-                    st.divider()
+    # Query Input
+    query = st.text_input("💬 Ask a question about your documents:", placeholder="e.g., What are the core project milestones or key figures mentioned?")
 
-question = st.chat_input("Ask a question about your documents...")
+    if query:
+        with st.spinner("Searching document corpus and matching excerpts..."):
+            matching_results = []
+            query_terms = set(query.lower().split())
 
-if question:
-    with st.chat_message("user"):
-        st.write(question)
+            # Search across all uploaded files and chunks
+            for filename, chunks in document_corpus.items():
+                for idx, chunk in enumerate(chunks):
+                    chunk_lower = chunk.lower()
+                    # Calculate keyword match score
+                    score = sum(1 for term in query_terms if term in chunk_lower)
+                    if score > 0:
+                        matching_results.append({
+                            "file": filename,
+                            "chunk_index": idx,
+                            "score": score,
+                            "text": chunk
+                        })
 
-    with st.chat_message("assistant"):
-        if store.stats()["total_chunks"] == 0:
-            error_msg = "No documents have been uploaded yet. Add a file in the sidebar first."
-            st.error(error_msg)
-            st.session_state.history.append({"question": question, "answer": error_msg, "citations": []})
+            # Sort results by highest match score
+            matching_results = sorted(matching_results, key=lambda x: x["score"], reverse=True)
+
+        st.markdown("### 💡 Grounded Answer & Citations")
+
+        if not matching_results:
+            st.warning("No direct matches found for your query. Try using different keywords or check if the information is inside the uploaded files.")
         else:
-            with st.spinner("Searching documents and generating an answer..."):
-                result = answer_question(store, question, top_k=top_k)
-            st.write(result["answer"])
-            if result["citations"]:
-                with st.expander(f"📎 {len(result['citations'])} source excerpt(s)"):
-                    for c in result["citations"]:
-                        page_info = f", page {c['page']}" if c.get("page") not in (None, -1) else ""
-                        st.markdown(f"**{c['source']}{page_info}**")
-                        st.caption(c["excerpt"])
+            # Display primary best match with strict citation block
+            best = matching_results[0]
+            st.markdown(f"""
+                <div class="citation-box">
+                    <p style="font-size: 1.05rem; font-weight: 500; color: #1E293B;">"{best['text']}"</p>
+                    <hr style="margin: 8px 0; border-color: #E2E8F0;">
+                    <p style="font-size: 0.85rem; color: #64748B; margin-bottom: 0;">
+                        📌 <b>Source Citation:</b> File: <code>{best['file']}</code> (Relevance Score: {best['score']})
+                    </p>
+                </div>
+            """, unsafe_allow_html=True)
+
+            # Display secondary matching excerpts if available
+            if len(matching_results) > 1:
+                with st.expander(f"📚 View {len(matching_results) - 1} additional matching excerpt(s)"):
+                    for alt in matching_results[1:5]:
+                        st.markdown(f"**File:** `{alt['file']}`")
+                        st.markdown(f"> {alt['text']}")
                         st.divider()
-            st.session_state.history.append({
-                "question": question,
-                "answer": result["answer"],
-                "citations": result["citations"],
-            })
