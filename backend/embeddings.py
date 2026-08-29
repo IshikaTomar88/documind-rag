@@ -1,23 +1,5 @@
 """
 embeddings.py
--------------
-Pluggable embedding backends behind one common interface.
-
-Why pluggable rather than hard-coded to one provider:
-  - "openai"     -> best quality, needs an API key, costs money per call.
-  - "local"      -> sentence-transformers running on the client's own
-                     machine. No API key, no per-call cost, data never
-                     leaves their infrastructure (important for clients
-                     with confidential internal documents).
-  - "tfidf"      -> zero-dependency, zero-cost, fully offline fallback.
-                     Not semantic (it's a classic bag-of-words vectorizer),
-                     but it lets the whole pipeline run and be demoed with
-                     no API key and no multi-GB model download -- useful
-                     for local dev, CI, and a client's first trial run.
-
-The embedding backend is chosen once via EMBEDDING_BACKEND and every
-piece downstream (vectorstore, ingestion CLI) just calls `.embed(texts)`
-without caring which one is active.
 """
 
 from __future__ import annotations
@@ -91,7 +73,29 @@ class TfidfEmbedder(BaseEmbedder):
         # vector store meaningful -- an unnormalized vector would make
         # "distance" scale with document length rather than topical
         # similarity.
-        return matrix.toarray().tolist()
+        vectors = matrix.toarray()
+
+        # BUG FIX: `max_features` is a CAP, not a fixed size -- if the
+        # corpus has fewer unique (non-stopword) terms than max_features,
+        # the vectorizer produces a narrower vector. Since the vocabulary
+        # grows every time new documents are ingested and the vectorizer
+        # is refit, two calls to embed() at different points in time can
+        # return different widths. Chroma locks in the dimensionality of
+        # the very first vector it stores, so any later batch at a
+        # different width raises InvalidArgumentError and the whole
+        # collection becomes unusable. We always pad/truncate to a fixed
+        # `self.dimension` so every vector this embedder ever returns is
+        # exactly the same width, regardless of vocabulary size.
+        width = vectors.shape[1] if vectors.ndim == 2 else 0
+        if width < self.dimension:
+            pad = self.dimension - width
+            vectors = [row.tolist() + [0.0] * pad for row in vectors]
+        elif width > self.dimension:
+            vectors = [row[: self.dimension].tolist() for row in vectors]
+        else:
+            vectors = vectors.tolist()
+
+        return vectors
 
 
 def get_embedder(backend: str | None = None) -> BaseEmbedder:
