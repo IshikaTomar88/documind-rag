@@ -1,22 +1,27 @@
 """
 main.py
--------
-FastAPI backend for DocuMind.
+------
+OPTIONAL standalone FastAPI backend for DocuMind.
+
+app.py (the Streamlit app) does NOT use this file -- it calls ingest.py /
+rag.py / vectorstore.py directly, in-process. Only deploy this if you
+need a REST API for something *other* than the Streamlit app to consume
+(a Slack bot, another internal tool, a mobile app, etc.), and deploy it
+as its own separate service with its own URL -- don't point the
+Streamlit app at "localhost:8000" for it, since on most hosts (including
+Streamlit Community Cloud) each app runs in its own isolated process/
+container and there is no "localhost" shared between them.
 
 Run:
-    uvicorn main:app --reload --port 8000
+    uvicorn api:app --reload --port 8000
 
 Endpoints
 ---------
-POST /documents/upload   -> ingest one or more PDFs/text files
-GET  /documents           -> list ingested source documents
-POST /ask                  -> ask a question, get an answer + citations
+POST   /documents/upload   -> ingest one or more PDFs/text files
+GET    /documents          -> list ingested source documents
+POST   /ask                -> ask a question, get an answer + citations
 DELETE /documents          -> wipe the index and start over
-GET  /health                -> liveness check
-
-The frontend (Streamlit) talks to this service over plain HTTP, which
-means the backend can also be called from a client's own internal tools,
-a Slack bot, a mobile app, etc. -- it isn't locked to one UI.
+GET    /health              -> liveness check
 """
 
 from __future__ import annotations
@@ -36,10 +41,9 @@ app = FastAPI(
     description="Vertical RAG document question-answering backend.",
     version="1.0.0",
 )
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # tighten this to your frontend's origin in production
+    allow_origins=["*"],  # tighten this to your caller's origin in production
     allow_methods=["*"],
     allow_headers=["*"],
 )
