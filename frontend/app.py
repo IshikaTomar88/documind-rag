@@ -29,7 +29,6 @@ st.markdown('<p class="sub-title">Upload business contracts, technical manuals, 
 with st.sidebar:
     st.header("🔑 Enterprise Configuration")
     
-    # Check Streamlit secrets first, otherwise provide input field
     default_key = st.secrets.get("GEMINI_API_KEY", "") if "GEMINI_API_KEY" in st.secrets else ""
     api_key_input = st.text_input("Google Gemini API Key", value=default_key, type="password", help="Enter your Gemini API key here.")
     api_key = api_key_input.strip() if api_key_input else ""
@@ -75,14 +74,12 @@ else:
         st.warning("⚠️ Please paste your Google Gemini API key into the sidebar text box above to enable AI processing.")
         st.stop()
 
-    # Consolidate text corpus cleanly with clear file boundaries
     compiled_corpus = "\n\n".join([f"=== DOCUMENT FILE: {name} ===\n{content}" for name, content in document_corpus.items()])
     
-    # Universal Client Prompt Bar
     user_query = st.chat_input("Ask anything about your documents (e.g., 'Is the word teamwork present?', 'Summarize the agreement', 'Translate section 1 into French'):")
 
     if user_query:
-        with st.spinner("Processing document corpus through Gemini intelligence core..."):
+        with st.spinner("Processing document corpus through Gemini 3.6 Flash engine..."):
             try:
                 system_instruction = (
                     "You are DocuMind Enterprise, an advanced document reasoning engine built for corporate clients. "
@@ -101,8 +98,8 @@ else:
                 CLIENT REQUEST: {user_query}
                 """
 
-                # Direct REST API call to Gemini endpoint (bypasses SDK signature issues)
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+                # Updated endpoint to use gemini-3.6-flash as required by current API rules
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={api_key}"
                 headers = {"Content-Type": "application/json"}
                 payload = {
                     "contents": [{
@@ -114,7 +111,6 @@ else:
                 res_json = response.json()
 
                 if response.status_code == 200:
-                    # Extract text safely from response structure
                     output_text = res_json["candidates"][0]["content"]["parts"][0]["text"]
                     st.markdown("### 💡 Professional Analysis Output")
                     st.markdown(f'<div class="response-container">{output_text}</div>', unsafe_allow_html=True)
