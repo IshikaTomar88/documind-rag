@@ -1,7 +1,8 @@
 import streamlit as st
 from pypdf import PdfReader
 import io
-from google import genai
+import requests
+import json
 
 # Page Configuration
 st.set_page_config(
@@ -31,8 +32,6 @@ with st.sidebar:
     # Check Streamlit secrets first, otherwise provide input field
     default_key = st.secrets.get("GEMINI_API_KEY", "") if "GEMINI_API_KEY" in st.secrets else ""
     api_key_input = st.text_input("Google Gemini API Key", value=default_key, type="password", help="Enter your Gemini API key here.")
-    
-    # Clean up any accidental spaces around the key
     api_key = api_key_input.strip() if api_key_input else ""
     
     st.divider()
@@ -52,7 +51,6 @@ with st.sidebar:
                 file_bytes = file.read()
                 file_text = ""
                 
-                # Lightweight page-by-page PDF extraction
                 if file.name.lower().endswith(".pdf"):
                     reader = PdfReader(io.BytesIO(file_bytes))
                     for i, page in enumerate(reader.pages):
@@ -73,7 +71,6 @@ with st.sidebar:
 if not uploaded_files:
     st.info("👈 Enter your Gemini API key in the sidebar and upload your client documents to activate the engine.")
 else:
-    # Explicit validation check to prevent blank key errors
     if not api_key:
         st.warning("⚠️ Please paste your Google Gemini API key into the sidebar text box above to enable AI processing.")
         st.stop()
@@ -87,9 +84,6 @@ else:
     if user_query:
         with st.spinner("Processing document corpus through Gemini intelligence core..."):
             try:
-                # Initialize official Google GenAI client with validated key
-                client = genai.Client(api_key=api_key)
-                
                 system_instruction = (
                     "You are DocuMind Enterprise, an advanced document reasoning engine built for corporate clients. "
                     "Your objective is to analyze the provided files with total precision. "
@@ -97,7 +91,7 @@ else:
                     "2. If they request summaries, structural breakdowns, definitions, or translations, execute them comprehensively and professionally."
                 )
 
-                prompt = f"""
+                full_prompt = f"""
                 {system_instruction}
 
                 --- UPLOADED DOCUMENTS DATA ---
@@ -107,14 +101,26 @@ else:
                 CLIENT REQUEST: {user_query}
                 """
 
-                # Call Gemini 2.5 Flash model
-                response = client.models.generate_content(
-                    model='gemini-2.5-flash',
-                    contents=prompt
-                )
+                # Direct REST API call to Gemini endpoint (bypasses SDK signature issues)
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+                headers = {"Content-Type": "application/json"}
+                payload = {
+                    "contents": [{
+                        "parts": [{"text": full_prompt}]
+                    }]
+                }
 
-                st.markdown("### 💡 Professional Analysis Output")
-                st.markdown(f'<div class="response-container">{response.text}</div>', unsafe_allow_html=True)
+                response = requests.post(url, headers=headers, data=json.dumps(payload))
+                res_json = response.json()
+
+                if response.status_code == 200:
+                    # Extract text safely from response structure
+                    output_text = res_json["candidates"][0]["content"]["parts"][0]["text"]
+                    st.markdown("### 💡 Professional Analysis Output")
+                    st.markdown(f'<div class="response-container">{output_text}</div>', unsafe_allow_html=True)
+                else:
+                    error_message = res_json.get("error", {}).get("message", "Unknown API error occurred")
+                    st.error(f"API Error ({response.status_code}): {error_message}")
 
             except Exception as e:
                 st.error(f"Execution failed: {e}")
