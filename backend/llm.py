@@ -1,15 +1,5 @@
 """
 llm.py
-------
-Pluggable LLM backend for the "Generation" half of RAG.
-
-Supports Anthropic (Claude) and OpenAI via API key, plus an
-"extractive" offline fallback that requires no API key at all --
-it just returns the most relevant retrieved sentences directly.
-That fallback exists so:
-  1. The full pipeline can be demoed/tested with zero API cost.
-  2. If a client's API key is missing/invalid/rate-limited, the app
-     degrades gracefully instead of crashing.
 """
 
 from __future__ import annotations
@@ -42,22 +32,10 @@ def generate_answer(question: str, hits: list[dict], backend: str | None = None)
     if not hits:
         return "I couldn't find anything relevant to that question in the uploaded documents."
 
-    try:
-        if backend == "anthropic":
-            return _generate_anthropic(question, hits)
-        if backend == "openai":
-            return _generate_openai(question, hits)
-    except Exception as exc:
-        # BUG FIX: originally an API error (missing/invalid key, rate limit,
-        # network hiccup) propagated straight up and crashed the request.
-        # The whole point of the "extractive" mode is graceful degradation,
-        # so fall back to it instead of surfacing a raw 500 to the user.
-        fallback = _generate_extractive(question, hits)
-        return (
-            f"⚠️ {backend.title()} generation failed ({exc}); "
-            f"falling back to extractive mode.\n\n{fallback}"
-        )
-
+    if backend == "anthropic":
+        return _generate_anthropic(question, hits)
+    if backend == "openai":
+        return _generate_openai(question, hits)
     return _generate_extractive(question, hits)
 
 
@@ -65,6 +43,9 @@ def _generate_anthropic(question: str, hits: list[dict]) -> str:
     import anthropic
     client = anthropic.Anthropic()
     context = _build_context_block(hits)
+    # NOTE: model names change over time -- if this string 404s, check
+    # https://docs.claude.com for the current list of model ids and set
+    # ANTHROPIC_MODEL to override this default.
     message = client.messages.create(
         model=os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5"),
         max_tokens=600,
