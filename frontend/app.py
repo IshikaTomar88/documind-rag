@@ -23,17 +23,12 @@ st.markdown("""
 st.markdown('<p class="main-title">💼 DocuMind Enterprise AI Workspace</p>', unsafe_allow_html=True)
 st.markdown('<p class="sub-title">Upload client documents and leverage instant executive intelligence.</p>', unsafe_allow_html=True)
 
-# ---------------------------------------------------------------------
 # Initialize Chat History in Session State
-# ---------------------------------------------------------------------
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# ---------------------------------------------------------------------
 # Sidebar: Credentials, New Chat Button & Document Vault
-# ---------------------------------------------------------------------
 with st.sidebar:
-    # Private Workspace "New Chat" Wipe Button
     if st.button("➕ New Chat", use_container_width=True):
         st.session_state.messages = []
         st.rerun()
@@ -41,8 +36,8 @@ with st.sidebar:
     st.markdown("---")
     st.header("🔑 Enterprise Configuration")
     
-    default_key = st.secrets.get("GEMINI_API_KEY", "AIzaSyCQx5EFZzndcE73GUWJchFG0OwkoToMsrM")
-    api_key_input = st.text_input("Google Gemini API Key", value=default_key, type="password")
+    # Leave blank or paste your brand new AI Studio key here
+    api_key_input = st.text_input("Google Gemini API Key", value="", type="password", help="Paste your fresh Google AI Studio API key here.")
     api_key = api_key_input.strip() if api_key_input else ""
     
     st.divider()
@@ -76,28 +71,21 @@ with st.sidebar:
             except Exception as e:
                 st.error(f"Error parsing {file.name}: {e}")
 
-# ---------------------------------------------------------------------
 # Main Execution Space
-# ---------------------------------------------------------------------
 if not uploaded_files:
     st.info("👈 Upload client documents in the sidebar to activate the DocuMind intelligence engine.")
     st.session_state.messages = []
 else:
     if not api_key:
-        st.warning("⚠️ Please provide a valid Google Gemini API key in the sidebar.")
+        st.warning("⚠️ Please paste your brand new Google Gemini API key into the sidebar to proceed.")
         st.stop()
 
-    # Consolidate text corpus cleanly with clear file boundaries
     compiled_corpus = "\n\n".join([f"=== DOCUMENT FILE: {name} ===\n{content}" for name, content in document_corpus.items()])
     
-    # Display historical chat history bubbles
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
-    # ---------------------------------------------------------------------
-    # Enterprise Quick Actions Toolbar (One-Click Business Insights)
-    # ---------------------------------------------------------------------
     st.markdown("##### ⚡ Executive Quick Actions")
     col1, col2, col3 = st.columns(3)
     
@@ -112,19 +100,14 @@ else:
         if st.button("📅 Dates & Action Items", use_container_width=True):
             triggered_quick_prompt = "Extract all critical deadlines, dates, financial figures, and action items mentioned in the documents."
 
-    # Chat Input Box at the bottom
-    user_query = st.chat_input("Ask anything about your documents (e.g., 'Is teamwork mentioned?', 'Summarize section 2'):")
-
-    # Determine prompt source (either manual typing or quick action button click)
+    user_query = st.chat_input("Ask anything about your documents...")
     active_prompt = user_query if user_query else triggered_quick_prompt
 
     if active_prompt:
-        # Save user message immediately to state and display
         st.session_state.messages.append({"role": "user", "content": active_prompt})
         with st.chat_message("user"):
             st.markdown(active_prompt)
 
-        # Generate Assistant Response with Auto-Retry for 503 Server Spikes
         with st.chat_message("assistant"):
             with st.spinner("Analyzing document corpus through Gemini 3.6 Flash..."):
                 try:
@@ -143,7 +126,6 @@ else:
                     -------------------------------
                     """
 
-                    # Build multi-turn context history
                     history_text = "\n".join([f"{m['role'].upper()}: {m['content']}" for m in st.session_state.messages])
                     final_payload_text = f"{full_prompt}\n\nCONVERSATION HISTORY:\n{history_text}\n\nProvide the next professional response."
 
@@ -155,7 +137,6 @@ else:
                         }]
                     }
 
-                    # Resilient 503 Auto-Retry Mechanism
                     max_retries = 3
                     success = False
                     output_text = ""
@@ -169,7 +150,7 @@ else:
                             success = True
                             break
                         elif response.status_code == 503:
-                            time.sleep(2 * (attempt + 1))  # Wait briefly and retry automatically
+                            time.sleep(2 * (attempt + 1))
                         else:
                             res_json = response.json()
                             error_msg = res_json.get("error", {}).get("message", f"API Error Code {response.status_code}")
@@ -179,7 +160,7 @@ else:
                         st.markdown(output_text)
                         st.session_state.messages.append({"role": "assistant", "content": output_text})
                         if triggered_quick_prompt:
-                            st.rerun() # Refresh to update layout cleanly after quick action button click
+                            st.rerun()
                     else:
                         final_err = error_msg if error_msg else "Server is experiencing high traffic. Please retry in a moment."
                         st.error(final_err)
