@@ -62,7 +62,7 @@ st.markdown(
 )
 
 LOCAL_EMBED_MODEL = "BAAI/bge-small-en-v1.5"
-GEN_MODELS = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-3.5-flash", "gemini-3.7-flash"]
+GEN_MODELS = ["gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.7-flash", "gemini-3.5-flash"]
 
 # --------------------------------------------------------------------------
 # Session state
@@ -278,8 +278,9 @@ with st.sidebar:
 
     gen_model = st.selectbox("Generation model", GEN_MODELS, index=0)
     st.caption(
-        "Flash models work on a free-tier key. Pro and 3.x models require billing "
-        "enabled on your Google AI Studio project."
+        "Model names shift as Google retires older ones — if you get a 404 saying a "
+        "model is unavailable, the error itself will name the current replacement; "
+        "swap it in here."
     )
 
     with st.expander("⚙️ Advanced settings"):
