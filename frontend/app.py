@@ -3,6 +3,7 @@ from pypdf import PdfReader
 import io
 import requests
 import json
+import time
 
 # Page Configuration
 st.set_page_config(
@@ -16,12 +17,11 @@ st.markdown("""
     <style>
     .main-title { font-size: 2.2rem; font-weight: 700; color: #0F172A; margin-bottom: 0px; }
     .sub-title { color: #475569; font-size: 1.05rem; margin-bottom: 2rem; }
-    .response-container { background-color: #F8FAFC; border: 1px solid #CBD5E1; padding: 24px; border-radius: 10px; margin-top: 15px; }
     </style>
 """, unsafe_allow_html=True)
 
 st.markdown('<p class="main-title">💼 DocuMind Enterprise AI Workspace</p>', unsafe_allow_html=True)
-st.markdown('<p class="sub-title">Upload business contracts, technical manuals, HR policies, or messy PDFs. Get precise answers, exact word checks, translations, and executive summaries instantly.</p>', unsafe_allow_html=True)
+st.markdown('<p class="sub-title">Upload client documents and chat naturally with full conversation history preserved.</p>', unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------
 # Sidebar: Credentials & Secure Document Vault
@@ -29,8 +29,9 @@ st.markdown('<p class="sub-title">Upload business contracts, technical manuals, 
 with st.sidebar:
     st.header("🔑 Enterprise Configuration")
     
-    default_key = st.secrets.get("GEMINI_API_KEY", "") if "GEMINI_API_KEY" in st.secrets else ""
-    api_key_input = st.text_input("Google Gemini API Key", value=default_key, type="password", help="Enter your Gemini API key here.")
+    # Pre-loaded with your specific key for seamless execution
+    default_key = st.secrets.get("GEMINI_API_KEY", "AIzaSyCQx5EFZzndcE73GUWJchFG0OwkoToMsrM")
+    api_key_input = st.text_input("Google Gemini API Key", value=default_key, type="password")
     api_key = api_key_input.strip() if api_key_input else ""
     
     st.divider()
@@ -65,58 +66,94 @@ with st.sidebar:
                 st.error(f"Error parsing {file.name}: {e}")
 
 # ---------------------------------------------------------------------
-# Main Execution Space
+# Initialize Chat History in Session State
 # ---------------------------------------------------------------------
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+# Clear chat if documents are removed
 if not uploaded_files:
-    st.info("👈 Enter your Gemini API key in the sidebar and upload your client documents to activate the engine.")
+    st.info("👈 Upload client documents in the sidebar to start chatting with your intelligence engine.")
+    st.session_state.messages = []
 else:
     if not api_key:
-        st.warning("⚠️ Please paste your Google Gemini API key into the sidebar text box above to enable AI processing.")
+        st.warning("⚠️ Please provide a valid Google Gemini API key in the sidebar.")
         st.stop()
 
+    # Consolidate text corpus cleanly with clear file boundaries
     compiled_corpus = "\n\n".join([f"=== DOCUMENT FILE: {name} ===\n{content}" for name, content in document_corpus.items()])
     
-    user_query = st.chat_input("Ask anything about your documents (e.g., 'Is the word teamwork present?', 'Summarize the agreement', 'Translate section 1 into French'):")
+    # Display historical chat history bubbles so messages remain on screen
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+
+    # Chat Input Box at the bottom
+    user_query = st.chat_input("Ask anything about your documents (e.g., 'Is teamwork mentioned?', 'Summarize section 2'):")
 
     if user_query:
-        with st.spinner("Processing document corpus through Gemini 3.6 Flash engine..."):
-            try:
-                system_instruction = (
-                    "You are DocuMind Enterprise, an advanced document reasoning engine built for corporate clients. "
-                    "Your objective is to analyze the provided files with total precision. "
-                    "1. If the user asks if a specific word, phrase, or term (like 'teamwork') is present, search the texts, confirm its exact presence or absence, and cite the relevant pages/files. "
-                    "2. If they request summaries, structural breakdowns, definitions, or translations, execute them comprehensively and professionally."
-                )
+        # Save user message immediately to state and display
+        st.session_state.messages.append({"role": "user", "content": user_query})
+        with st.chat_message("user"):
+            st.markdown(user_query)
 
-                full_prompt = f"""
-                {system_instruction}
+        # Generate Assistant Response with Auto-Retry for 503 Server Spikes
+        with st.chat_message("assistant"):
+            with st.spinner("Analyzing document corpus through Gemini 3.6 Flash..."):
+                try:
+                    system_instruction = (
+                        "You are DocuMind Enterprise, an advanced document reasoning engine built for corporate clients. "
+                        "Analyze the provided files with total precision. "
+                        "1. If asked about exact terms or words, confirm their presence/absence and cite page numbers. "
+                        "2. Provide clear, professional summaries, definitions, or translations as requested."
+                    )
 
-                --- UPLOADED DOCUMENTS DATA ---
-                {compiled_corpus}
-                -------------------------------
+                    full_prompt = f"""
+                    {system_instruction}
 
-                CLIENT REQUEST: {user_query}
-                """
+                    --- UPLOADED DOCUMENTS DATA ---
+                    {compiled_corpus}
+                    -------------------------------
+                    """
 
-                # Updated endpoint to use gemini-3.6-flash as required by current API rules
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={api_key}"
-                headers = {"Content-Type": "application/json"}
-                payload = {
-                    "contents": [{
-                        "parts": [{"text": full_prompt}]
-                    }]
-                }
+                    # Build multi-turn context history
+                    history_text = "\n".join([f"{m['role'].upper()}: {m['content']}" for m in st.session_state.messages])
+                    final_payload_text = f"{full_prompt}\n\nCONVERSATION HISTORY:\n{history_text}\n\nProvide the next professional response."
 
-                response = requests.post(url, headers=headers, data=json.dumps(payload))
-                res_json = response.json()
+                    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={api_key}"
+                    headers = {"Content-Type": "application/json"}
+                    payload = {
+                        "contents": [{
+                            "parts": [{"text": final_payload_text}]
+                        }]
+                    }
 
-                if response.status_code == 200:
-                    output_text = res_json["candidates"][0]["content"]["parts"][0]["text"]
-                    st.markdown("### 💡 Professional Analysis Output")
-                    st.markdown(f'<div class="response-container">{output_text}</div>', unsafe_allow_html=True)
-                else:
-                    error_message = res_json.get("error", {}).get("message", "Unknown API error occurred")
-                    st.error(f"API Error ({response.status_code}): {error_message}")
+                    # Resilient 503 Auto-Retry Mechanism
+                    max_retries = 3
+                    success = False
+                    output_text = ""
+                    error_msg = ""
 
-            except Exception as e:
-                st.error(f"Execution failed: {e}")
+                    for attempt in range(max_retries):
+                        response = requests.post(url, headers=headers, data=json.dumps(payload))
+                        if response.status_code == 200:
+                            res_json = response.json()
+                            output_text = res_json["candidates"][0]["content"]["parts"][0]["text"]
+                            success = True
+                            break
+                        elif response.status_code == 503:
+                            time.sleep(2 * (attempt + 1))  # Wait briefly and retry automatically
+                        else:
+                            res_json = response.json()
+                            error_msg = res_json.get("error", {}).get("message", f"API Error Code {response.status_code}")
+                            break
+
+                    if success:
+                        st.markdown(output_text)
+                        st.session_state.messages.append({"role": "assistant", "content": output_text})
+                    else:
+                        final_err = error_msg if error_msg else "Server is experiencing high traffic. Please retry in a moment."
+                        st.error(final_err)
+
+                except Exception as e:
+                    st.error(f"Execution failed: {e}")
