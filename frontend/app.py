@@ -119,11 +119,14 @@ def get_client(api_key: str):
 
 
 def embed_texts(client, texts, show_progress=True):
-    """Returns (matrix, kept_indices). Failed items are skipped, not zero-filled."""
+    """Returns (matrix, kept_indices, last_error). Failed items are skipped, not zero-filled.
+    If the very first call fails, stops immediately instead of burning retries on every
+    chunk — a first-call failure is almost always systemic (bad key, wrong model, no
+    billing/access), not a transient one."""
     if not texts:
-        return np.zeros((0, 1), dtype=np.float32), []
+        return np.zeros((0, 1), dtype=np.float32), [], None
 
-    vectors, kept, failed = [], [], 0
+    vectors, kept, failed, last_error = [], [], 0, None
     bar = st.progress(0.0) if show_progress else None
     for i, t in enumerate(texts):
         vec = None
@@ -132,22 +135,29 @@ def embed_texts(client, texts, show_progress=True):
                 resp = client.models.embed_content(model=EMBED_MODEL, contents=t[:8000])
                 vec = np.array(resp.embeddings[0].values, dtype=np.float32)
                 break
-            except Exception:
+            except Exception as e:
+                last_error = str(e)
                 time.sleep(1.2 * (attempt + 1))
         if vec is not None:
             vectors.append(vec)
             kept.append(i)
         else:
             failed += 1
+            if i == 0:
+                # First chunk failed all 3 attempts — this won't fix itself by
+                # retrying the rest of the file. Bail out now.
+                if bar:
+                    bar.empty()
+                return np.zeros((0, 1), dtype=np.float32), [], last_error
         if bar:
             bar.progress((i + 1) / len(texts))
     if bar:
         bar.empty()
     if failed:
-        st.warning(f"{failed} chunk(s) could not be embedded after retries and were skipped.")
+        st.warning(f"{failed} chunk(s) could not be embedded after retries and were skipped. Last error: {last_error}")
 
     matrix = np.vstack(vectors) if vectors else np.zeros((0, 1), dtype=np.float32)
-    return matrix, kept
+    return matrix, kept, last_error
 
 
 def cosine_topk(query_vec: np.ndarray, matrix: np.ndarray, chunks: list, k: int):
@@ -212,9 +222,10 @@ SYSTEM_INSTRUCTION = (
 
 
 def answer_freeform(client, gen_model, query, history_text, chunks, matrix, k):
-    q_matrix, kept = embed_texts(client, [query], show_progress=False)
+    q_matrix, kept, err = embed_texts(client, [query], show_progress=False)
     if not kept:
-        return "Could not embed the question — please retry.", []
+        detail = f" Error: {err}" if err else ""
+        return f"Could not process the question.{detail}", []
     hits = cosine_topk(q_matrix[0], matrix, chunks, k=k)
     context = build_context(hits, with_scores=True)
     prompt = (
@@ -242,8 +253,8 @@ with st.sidebar:
         st.session_state.messages = []
         st.rerun()
     st.caption(
-        "Wipes chat memory completely — nothing from the previous conversation is "
-        "sent to the model again. Your indexed documents stay loaded (no re-uploading)."
+        "Clears the conversation completely — no earlier messages are reused. "
+        "Your indexed documents stay loaded, so there's no need to re-upload them."
     )
 
     st.markdown("---")
@@ -265,6 +276,10 @@ with st.sidebar:
         st.stop()
 
     gen_model = st.selectbox("Generation model", GEN_MODELS, index=0)
+    st.caption(
+        "Flash models work on a free-tier key. Pro and 3.x models require billing "
+        "enabled on your Google AI Studio project."
+    )
 
     with st.expander("⚙️ Advanced settings"):
         chunk_size = st.slider("Chunk size (characters)", 400, 2000, 900, 100)
@@ -297,12 +312,28 @@ with st.sidebar:
                     if not chunks:
                         st.error(f"No extractable text found in {f.name}.")
                         continue
-                    matrix, kept = embed_texts(client, [c["text"] for c in chunks])
+                    matrix, kept, err = embed_texts(client, [c["text"] for c in chunks])
                     chunks = [chunks[i] for i in kept]
+
+                if not chunks:
+                    st.error(f"❌ Indexing failed for {f.name} — every chunk was rejected.")
+                    if err:
+                        st.code(err, language=None)
+                        low = err.lower()
+                        if "404" in low or "not found" in low:
+                            st.caption("Hint: the embedding model name may be unavailable for your key/region.")
+                        elif "403" in low or "permission" in low:
+                            st.caption("Hint: this key doesn't have access to the embedding model — check API access/billing in Google AI Studio.")
+                        elif "401" in low or "invalid" in low or "api key" in low:
+                            st.caption("Hint: the API key itself may be invalid or revoked.")
+                        elif "429" in low or "quota" in low or "rate" in low:
+                            st.caption("Hint: rate limit or quota exceeded — wait a bit and retry.")
+                    # Don't cache a broken empty entry — let it retry next rerun.
+                else:
                     st.session_state.index_store[h] = {
                         "name": f.name, "chunks": chunks, "vectors": matrix,
                     }
-                st.success(f"Indexed {f.name} — {len(chunks)} chunk(s)")
+                    st.success(f"Indexed {f.name} — {len(chunks)} chunk(s)")
 
         st.caption("Currently indexed in this session:")
         for h in active_hashes:
