@@ -2,14 +2,14 @@
 DocuMind Enterprise — Document Intelligence Engine
 ---------------------------------------------------
 Hybrid-privacy RAG pipeline:
-  extract -> chunk (per page) -> embed LOCALLY (sentence-transformers, no key,
-  no network call, documents never leave this machine) -> cache -> retrieve
-  top-k by cosine similarity -> generate the cited answer via a cloud LLM
-  (Gemini). Only the final retrieved snippets + your question ever reach the
-  cloud — full documents are never sent anywhere for indexing.
+  extract -> chunk (per page) -> embed LOCALLY (fastembed / ONNX runtime, no
+  key, no PyTorch, no network call after first model download — documents
+  never leave this machine for indexing) -> cache -> retrieve top-k by cosine
+  similarity -> generate the cited answer via a cloud LLM (Gemini). Only the
+  final retrieved snippets + your question ever reach the cloud.
 
 Requirements:
-    pip install streamlit pypdf google-genai numpy sentence-transformers
+    pip install streamlit pypdf google-genai numpy fastembed
 
 Run:
     streamlit run documind_app.py
@@ -18,8 +18,8 @@ Set your key either in .streamlit/secrets.toml as GEMINI_API_KEY, or paste it
 into the sidebar at runtime. The key is only needed to ask questions — you can
 upload and index documents with no key at all.
 
-Note: the local embedding model (~90MB) downloads once on first run and is
-cached by sentence-transformers afterward; that first run needs internet
+Note: the local embedding model (~130MB, quantized) downloads once on first
+run and is cached by fastembed afterward; that first run needs internet
 access, subsequent runs do not.
 """
 
@@ -32,7 +32,7 @@ import numpy as np
 import streamlit as st
 from pypdf import PdfReader
 from google import genai
-from sentence_transformers import SentenceTransformer
+from fastembed import TextEmbedding
 
 # --------------------------------------------------------------------------
 # Page config & styling
@@ -61,7 +61,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-LOCAL_EMBED_MODEL = "all-MiniLM-L6-v2"
+LOCAL_EMBED_MODEL = "BAAI/bge-small-en-v1.5"
 GEN_MODELS = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-3.5-flash", "gemini-3.7-flash"]
 
 # --------------------------------------------------------------------------
@@ -125,7 +125,7 @@ def build_chunks_for_file(name: str, data: bytes, chunk_size: int, overlap: int)
 
 @st.cache_resource(show_spinner="Loading local embedding model (first run only)...")
 def get_embedder():
-    return SentenceTransformer(LOCAL_EMBED_MODEL)
+    return TextEmbedding(model_name=LOCAL_EMBED_MODEL)
 
 
 @st.cache_resource(show_spinner=False)
@@ -134,22 +134,19 @@ def get_client(api_key: str):
 
 
 def embed_texts(texts, show_progress=True):
-    """Embeds locally via sentence-transformers — no API key, no network call,
-    document content never leaves this machine for indexing. Returns
-    (matrix, kept_indices, error)."""
+    """Embeds locally via fastembed (ONNX runtime) — no API key, no PyTorch,
+    no network call after the first model download, document content never
+    leaves this machine for indexing. Returns (matrix, kept_indices, error)."""
     if not texts:
         return np.zeros((0, 1), dtype=np.float32), [], None
     try:
         embedder = get_embedder()
         bar = st.progress(0.0, text="Embedding locally...") if show_progress else None
-        vectors = embedder.encode(
-            texts, batch_size=32, convert_to_numpy=True,
-            normalize_embeddings=True, show_progress_bar=False,
-        )
+        vectors = np.array(list(embedder.embed(texts)), dtype=np.float32)
         if bar:
             bar.progress(1.0)
             bar.empty()
-        return vectors.astype(np.float32), list(range(len(texts))), None
+        return vectors, list(range(len(texts))), None
     except Exception as e:
         return np.zeros((0, 1), dtype=np.float32), [], str(e)
 
@@ -323,7 +320,7 @@ with st.sidebar:
                         st.caption(
                             "Hint: if this is the first run, the local embedding model "
                             "(~90MB) may have failed to download — check internet access "
-                            "and that `sentence-transformers` is installed."
+                            "and that `fastembed` is installed."
                         )
                     # Don't cache a broken empty entry — let it retry next rerun.
                 else:
