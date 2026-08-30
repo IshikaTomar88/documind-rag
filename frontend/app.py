@@ -320,7 +320,13 @@ with st.sidebar:
                     if err:
                         st.code(err, language=None)
                         low = err.lower()
-                        if "404" in low or "not found" in low:
+                        if "leaked" in low or "compromised" in low:
+                            st.error(
+                                "Google detected this exact key exposed somewhere public and revoked it. "
+                                "It cannot be reactivated — generate a new key at aistudio.google.com/apikey "
+                                "and avoid pasting it anywhere public (repos, docs, chats, screenshots)."
+                            )
+                        elif "404" in low or "not found" in low:
                             st.caption("Hint: the embedding model name may be unavailable for your key/region.")
                         elif "403" in low or "permission" in low:
                             st.caption("Hint: this key doesn't have access to the embedding model — check API access/billing in Google AI Studio.")
