@@ -26,6 +26,7 @@ access, subsequent runs do not.
 import hashlib
 import io
 import re
+import time
 from collections import defaultdict
 
 import numpy as np
@@ -212,6 +213,25 @@ SYSTEM_INSTRUCTION = (
 )
 
 
+def generate_with_retry(client, gen_model, prompt, max_retries=3):
+    """Retries on transient server-side errors (model overloaded / rate limited).
+    Does NOT retry on permanent errors (bad model name, auth, permission) —
+    those won't fix themselves and retrying just wastes time."""
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            resp = client.models.generate_content(model=gen_model, contents=prompt)
+            return resp.text, None
+        except Exception as e:
+            msg = str(e)
+            last_error = msg
+            transient = any(code in msg for code in ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED"))
+            if not transient or attempt == max_retries - 1:
+                break
+            time.sleep(2 * (attempt + 1))
+    return None, last_error
+
+
 def answer_freeform(client, gen_model, query, history_text, chunks, matrix, k):
     q_matrix, kept, err = embed_texts([query], show_progress=False)
     if not kept:
@@ -223,17 +243,21 @@ def answer_freeform(client, gen_model, query, history_text, chunks, matrix, k):
         f"{SYSTEM_INSTRUCTION}\n\nCONTEXT CHUNKS:\n{context}\n\n"
         f"CONVERSATION HISTORY:\n{history_text}\n\nQUESTION: {query}"
     )
-    resp = client.models.generate_content(model=gen_model, contents=prompt)
-    return resp.text, hits
+    text, error = generate_with_retry(client, gen_model, prompt)
+    if error:
+        raise RuntimeError(error)
+    return text, hits
 
 
 def answer_broad(client, gen_model, instruction, chunks):
     sample = representative_sample(chunks)
     context = build_context(sample, with_scores=False)
     prompt = f"{SYSTEM_INSTRUCTION}\n\nCONTEXT CHUNKS (broad sample across all documents):\n{context}\n\nTASK: {instruction}"
-    resp = client.models.generate_content(model=gen_model, contents=prompt)
+    text, error = generate_with_retry(client, gen_model, prompt)
+    if error:
+        raise RuntimeError(error)
     pairs = [(c, None) for c in sample]
-    return resp.text, pairs
+    return text, pairs
 
 
 # --------------------------------------------------------------------------
@@ -412,13 +436,21 @@ with col3:
         quick_mode = "broad"
 
 user_query = st.chat_input("Ask anything about your documents...")
-active_prompt = user_query if user_query else quick_prompt
-mode = "freeform" if user_query else quick_mode
+retry_prompt = st.session_state.pop("retry_prompt", None)
+retry_mode = st.session_state.pop("retry_mode", None)
+
+if retry_prompt:
+    active_prompt, mode, is_retry = retry_prompt, retry_mode, True
+else:
+    active_prompt = user_query if user_query else quick_prompt
+    mode = "freeform" if user_query else quick_mode
+    is_retry = False
 
 if active_prompt:
-    st.session_state.messages.append({"role": "user", "content": active_prompt})
-    with st.chat_message("user"):
-        st.markdown(active_prompt)
+    if not is_retry:
+        st.session_state.messages.append({"role": "user", "content": active_prompt})
+        with st.chat_message("user"):
+            st.markdown(active_prompt)
 
     with st.chat_message("assistant"):
         with st.spinner(f"Analyzing document corpus with {gen_model}..."):
@@ -446,4 +478,14 @@ if active_prompt:
                     {"role": "assistant", "content": output_text, "sources": sources}
                 )
             except Exception as e:
-                st.error(f"Execution failed: {e}")
+                msg = str(e)
+                if "503" in msg or "UNAVAILABLE" in msg:
+                    st.warning("⏳ Gemini is temporarily overloaded (503) on Google's side. This usually clears within a minute or two — your question wasn't lost.")
+                elif "429" in msg or "RESOURCE_EXHAUSTED" in msg:
+                    st.warning("⏳ Rate limit or quota hit (429). Wait a bit before retrying — your question wasn't lost.")
+                else:
+                    st.error(f"Execution failed: {msg}")
+                if st.button("🔄 Retry this question", key=f"retry_btn_{len(st.session_state.messages)}"):
+                    st.session_state.retry_prompt = active_prompt
+                    st.session_state.retry_mode = mode
+                    st.rerun()
