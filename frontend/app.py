@@ -21,7 +21,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<p class="main-title">💼 DocuMind Enterprise AI Workspace</p>', unsafe_allow_html=True)
-st.markdown('<p class="sub-title">Upload client documents and chat naturally with full conversation history preserved.</p>', unsafe_allow_html=True)
+st.markdown('<p class="sub-title">Upload client documents and leverage instant executive intelligence.</p>', unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------
 # Initialize Chat History in Session State
@@ -33,7 +33,7 @@ if "messages" not in st.session_state:
 # Sidebar: Credentials, New Chat Button & Document Vault
 # ---------------------------------------------------------------------
 with st.sidebar:
-    # ChatGPT / Gemini Style "New Chat" Action Button
+    # Private Workspace "New Chat" Wipe Button
     if st.button("➕ New Chat", use_container_width=True):
         st.session_state.messages = []
         st.rerun()
@@ -41,7 +41,6 @@ with st.sidebar:
     st.markdown("---")
     st.header("🔑 Enterprise Configuration")
     
-    # Pre-loaded with your specific key for seamless execution
     default_key = st.secrets.get("GEMINI_API_KEY", "AIzaSyCQx5EFZzndcE73GUWJchFG0OwkoToMsrM")
     api_key_input = st.text_input("Google Gemini API Key", value=default_key, type="password")
     api_key = api_key_input.strip() if api_key_input else ""
@@ -81,7 +80,7 @@ with st.sidebar:
 # Main Execution Space
 # ---------------------------------------------------------------------
 if not uploaded_files:
-    st.info("👈 Upload client documents in the sidebar to start chatting with your intelligence engine.")
+    st.info("👈 Upload client documents in the sidebar to activate the DocuMind intelligence engine.")
     st.session_state.messages = []
 else:
     if not api_key:
@@ -91,19 +90,39 @@ else:
     # Consolidate text corpus cleanly with clear file boundaries
     compiled_corpus = "\n\n".join([f"=== DOCUMENT FILE: {name} ===\n{content}" for name, content in document_corpus.items()])
     
-    # Display historical chat history bubbles so messages remain on screen
+    # Display historical chat history bubbles
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
+    # ---------------------------------------------------------------------
+    # Enterprise Quick Actions Toolbar (One-Click Business Insights)
+    # ---------------------------------------------------------------------
+    st.markdown("##### ⚡ Executive Quick Actions")
+    col1, col2, col3 = st.columns(3)
+    
+    triggered_quick_prompt = None
+    with col1:
+        if st.button("📝 Executive Summary", use_container_width=True):
+            triggered_quick_prompt = "Provide a comprehensive executive summary of the uploaded documents, highlighting core objectives and key takeaways."
+    with col2:
+        if st.button("⚠️ Risk & Liability Analysis", use_container_width=True):
+            triggered_quick_prompt = "Analyze the documents for potential risks, liabilities, or critical clauses. List them clearly with recommendations."
+    with col3:
+        if st.button("📅 Dates & Action Items", use_container_width=True):
+            triggered_quick_prompt = "Extract all critical deadlines, dates, financial figures, and action items mentioned in the documents."
+
     # Chat Input Box at the bottom
     user_query = st.chat_input("Ask anything about your documents (e.g., 'Is teamwork mentioned?', 'Summarize section 2'):")
 
-    if user_query:
+    # Determine prompt source (either manual typing or quick action button click)
+    active_prompt = user_query if user_query else triggered_quick_prompt
+
+    if active_prompt:
         # Save user message immediately to state and display
-        st.session_state.messages.append({"role": "user", "content": user_query})
+        st.session_state.messages.append({"role": "user", "content": active_prompt})
         with st.chat_message("user"):
-            st.markdown(user_query)
+            st.markdown(active_prompt)
 
         # Generate Assistant Response with Auto-Retry for 503 Server Spikes
         with st.chat_message("assistant"):
@@ -113,7 +132,7 @@ else:
                         "You are DocuMind Enterprise, an advanced document reasoning engine built for corporate clients. "
                         "Analyze the provided files with total precision. "
                         "1. If asked about exact terms or words, confirm their presence/absence and cite page numbers. "
-                        "2. Provide clear, professional summaries, definitions, or translations as requested."
+                        "2. Provide clear, professional summaries, risk assessments, definitions, or translations as requested."
                     )
 
                     full_prompt = f"""
@@ -159,6 +178,8 @@ else:
                     if success:
                         st.markdown(output_text)
                         st.session_state.messages.append({"role": "assistant", "content": output_text})
+                        if triggered_quick_prompt:
+                            st.rerun() # Refresh to update layout cleanly after quick action button click
                     else:
                         final_err = error_msg if error_msg else "Server is experiencing high traffic. Please retry in a moment."
                         st.error(final_err)
