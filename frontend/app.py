@@ -1,28 +1,38 @@
 """
 DocuMind Enterprise — Document Intelligence Engine
 ---------------------------------------------------
-Real RAG pipeline: extract -> chunk (per page) -> embed -> cache -> retrieve top-k -> cite.
+Hybrid-privacy RAG pipeline:
+  extract -> chunk (per page) -> embed LOCALLY (sentence-transformers, no key,
+  no network call, documents never leave this machine) -> cache -> retrieve
+  top-k by cosine similarity -> generate the cited answer via a cloud LLM
+  (Gemini). Only the final retrieved snippets + your question ever reach the
+  cloud — full documents are never sent anywhere for indexing.
 
 Requirements:
-    pip install streamlit pypdf google-genai numpy
+    pip install streamlit pypdf google-genai numpy sentence-transformers
 
 Run:
     streamlit run documind_app.py
 
 Set your key either in .streamlit/secrets.toml as GEMINI_API_KEY, or paste it
-into the sidebar at runtime.
+into the sidebar at runtime. The key is only needed to ask questions — you can
+upload and index documents with no key at all.
+
+Note: the local embedding model (~90MB) downloads once on first run and is
+cached by sentence-transformers afterward; that first run needs internet
+access, subsequent runs do not.
 """
 
 import hashlib
 import io
 import re
-import time
 from collections import defaultdict
 
 import numpy as np
 import streamlit as st
 from pypdf import PdfReader
 from google import genai
+from sentence_transformers import SentenceTransformer
 
 # --------------------------------------------------------------------------
 # Page config & styling
@@ -51,7 +61,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-EMBED_MODEL = "gemini-embedding-001"
+LOCAL_EMBED_MODEL = "all-MiniLM-L6-v2"
 GEN_MODELS = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-3.5-flash", "gemini-3.7-flash"]
 
 # --------------------------------------------------------------------------
@@ -113,51 +123,35 @@ def build_chunks_for_file(name: str, data: bytes, chunk_size: int, overlap: int)
     return chunks
 
 
+@st.cache_resource(show_spinner="Loading local embedding model (first run only)...")
+def get_embedder():
+    return SentenceTransformer(LOCAL_EMBED_MODEL)
+
+
 @st.cache_resource(show_spinner=False)
 def get_client(api_key: str):
     return genai.Client(api_key=api_key)
 
 
-def embed_texts(client, texts, show_progress=True):
-    """Returns (matrix, kept_indices, last_error). Failed items are skipped, not zero-filled.
-    If the very first call fails, stops immediately instead of burning retries on every
-    chunk — a first-call failure is almost always systemic (bad key, wrong model, no
-    billing/access), not a transient one."""
+def embed_texts(texts, show_progress=True):
+    """Embeds locally via sentence-transformers — no API key, no network call,
+    document content never leaves this machine for indexing. Returns
+    (matrix, kept_indices, error)."""
     if not texts:
         return np.zeros((0, 1), dtype=np.float32), [], None
-
-    vectors, kept, failed, last_error = [], [], 0, None
-    bar = st.progress(0.0) if show_progress else None
-    for i, t in enumerate(texts):
-        vec = None
-        for attempt in range(3):
-            try:
-                resp = client.models.embed_content(model=EMBED_MODEL, contents=t[:8000])
-                vec = np.array(resp.embeddings[0].values, dtype=np.float32)
-                break
-            except Exception as e:
-                last_error = str(e)
-                time.sleep(1.2 * (attempt + 1))
-        if vec is not None:
-            vectors.append(vec)
-            kept.append(i)
-        else:
-            failed += 1
-            if i == 0:
-                # First chunk failed all 3 attempts — this won't fix itself by
-                # retrying the rest of the file. Bail out now.
-                if bar:
-                    bar.empty()
-                return np.zeros((0, 1), dtype=np.float32), [], last_error
+    try:
+        embedder = get_embedder()
+        bar = st.progress(0.0, text="Embedding locally...") if show_progress else None
+        vectors = embedder.encode(
+            texts, batch_size=32, convert_to_numpy=True,
+            normalize_embeddings=True, show_progress_bar=False,
+        )
         if bar:
-            bar.progress((i + 1) / len(texts))
-    if bar:
-        bar.empty()
-    if failed:
-        st.warning(f"{failed} chunk(s) could not be embedded after retries and were skipped. Last error: {last_error}")
-
-    matrix = np.vstack(vectors) if vectors else np.zeros((0, 1), dtype=np.float32)
-    return matrix, kept, last_error
+            bar.progress(1.0)
+            bar.empty()
+        return vectors.astype(np.float32), list(range(len(texts))), None
+    except Exception as e:
+        return np.zeros((0, 1), dtype=np.float32), [], str(e)
 
 
 def cosine_topk(query_vec: np.ndarray, matrix: np.ndarray, chunks: list, k: int):
@@ -222,7 +216,7 @@ SYSTEM_INSTRUCTION = (
 
 
 def answer_freeform(client, gen_model, query, history_text, chunks, matrix, k):
-    q_matrix, kept, err = embed_texts(client, [query], show_progress=False)
+    q_matrix, kept, err = embed_texts([query], show_progress=False)
     if not kept:
         detail = f" Error: {err}" if err else ""
         return f"Could not process the question.{detail}", []
@@ -258,15 +252,25 @@ with st.sidebar:
     )
 
     st.markdown("---")
-    st.header("🔑 Configuration")
+    st.header("🔑 Configuration (needed only to ask questions)")
     st.caption(
-        "This app calls **Google's Gemini API**, not OpenAI/ChatGPT. Get a free key "
-        "(starts with `AIza...`) at [aistudio.google.com/apikey](https://aistudio.google.com/apikey)."
+        "Documents are embedded **100% locally** on this machine — no API key needed, "
+        "and no document content is sent anywhere for indexing. A Gemini key is only "
+        "used for the final step: turning retrieved snippets into an answer."
     )
     default_key = st.secrets.get("GEMINI_API_KEY", "")
     api_key = st.text_input(
-        "Google Gemini API Key", value=default_key, type="password"
+        "Google Gemini API Key (for generation only)", value=default_key, type="password",
+        help="Get a free key at aistudio.google.com/apikey",
     ).strip()
+
+    if api_key.startswith("sk-"):
+        st.error(
+            "That looks like an OpenAI/ChatGPT key (`sk-...`), not a Gemini key — "
+            "this app only calls the Gemini API for answer generation. Get a Gemini "
+            "key at aistudio.google.com/apikey."
+        )
+        st.stop()
 
     if api_key.startswith("sk-"):
         st.error(
@@ -302,44 +306,31 @@ with st.sidebar:
             if h not in st.session_state.index_store
         ]
 
-        if missing and not api_key:
-            st.warning(f"⚠️ {len(missing)} new file(s) need indexing — add your API key to build the index.")
-        elif missing and api_key:
-            client = get_client(api_key)
+        if missing:
             for f, h in missing:
-                with st.spinner(f"Indexing {f.name}..."):
+                with st.spinner(f"Indexing {f.name} (local, no API call)..."):
                     chunks = build_chunks_for_file(f.name, f.getvalue(), chunk_size, overlap)
                     if not chunks:
                         st.error(f"No extractable text found in {f.name}.")
                         continue
-                    matrix, kept, err = embed_texts(client, [c["text"] for c in chunks])
+                    matrix, kept, err = embed_texts([c["text"] for c in chunks])
                     chunks = [chunks[i] for i in kept]
 
                 if not chunks:
-                    st.error(f"❌ Indexing failed for {f.name} — every chunk was rejected.")
+                    st.error(f"❌ Local indexing failed for {f.name}.")
                     if err:
                         st.code(err, language=None)
-                        low = err.lower()
-                        if "leaked" in low or "compromised" in low:
-                            st.error(
-                                "Google detected this exact key exposed somewhere public and revoked it. "
-                                "It cannot be reactivated — generate a new key at aistudio.google.com/apikey "
-                                "and avoid pasting it anywhere public (repos, docs, chats, screenshots)."
-                            )
-                        elif "404" in low or "not found" in low:
-                            st.caption("Hint: the embedding model name may be unavailable for your key/region.")
-                        elif "403" in low or "permission" in low:
-                            st.caption("Hint: this key doesn't have access to the embedding model — check API access/billing in Google AI Studio.")
-                        elif "401" in low or "invalid" in low or "api key" in low:
-                            st.caption("Hint: the API key itself may be invalid or revoked.")
-                        elif "429" in low or "quota" in low or "rate" in low:
-                            st.caption("Hint: rate limit or quota exceeded — wait a bit and retry.")
+                        st.caption(
+                            "Hint: if this is the first run, the local embedding model "
+                            "(~90MB) may have failed to download — check internet access "
+                            "and that `sentence-transformers` is installed."
+                        )
                     # Don't cache a broken empty entry — let it retry next rerun.
                 else:
                     st.session_state.index_store[h] = {
                         "name": f.name, "chunks": chunks, "vectors": matrix,
                     }
-                    st.success(f"Indexed {f.name} — {len(chunks)} chunk(s)")
+                    st.success(f"Indexed {f.name} — {len(chunks)} chunk(s) (local)")
 
         st.caption("Currently indexed in this session:")
         for h in active_hashes:
@@ -377,22 +368,23 @@ if not uploaded_files:
     st.info("👈 Upload client documents in the sidebar to activate the DocuMind intelligence engine.")
     st.stop()
 
-if not api_key:
-    st.warning("⚠️ Please provide your Google Gemini API key in the sidebar to proceed.")
-    st.stop()
-
-client = get_client(api_key)
 chunks, matrix = active_corpus(active_hashes)
 
 if not chunks:
     st.info("Indexing in progress or no text could be extracted yet — check the sidebar.")
     st.stop()
 
-st.caption(f"📚 {len(set(c['file'] for c in chunks))} document(s) · {len(chunks)} indexed chunks")
+st.caption(f"📚 {len(set(c['file'] for c in chunks))} document(s) · {len(chunks)} indexed chunks (embedded locally)")
 st.caption(
     "🔒 This conversation only ever sees messages from *this* session — no memory "
     "persists across browser sessions or leaks in from other users/clients."
 )
+
+if not api_key:
+    st.warning("⚠️ Your documents are indexed and ready. Add your Gemini API key in the sidebar to start asking questions.")
+    st.stop()
+
+client = get_client(api_key)
 
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
