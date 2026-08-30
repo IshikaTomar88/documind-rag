@@ -238,16 +238,32 @@ def answer_broad(client, gen_model, instruction, chunks):
 # Sidebar
 # --------------------------------------------------------------------------
 with st.sidebar:
-    if st.button("➕ New Chat", use_container_width=True):
+    if st.button("🆕 Start New Conversation", use_container_width=True):
         st.session_state.messages = []
         st.rerun()
+    st.caption(
+        "Wipes chat memory completely — nothing from the previous conversation is "
+        "sent to the model again. Your indexed documents stay loaded (no re-uploading)."
+    )
 
     st.markdown("---")
     st.header("🔑 Configuration")
+    st.caption(
+        "This app calls **Google's Gemini API**, not OpenAI/ChatGPT. Get a free key "
+        "(starts with `AIza...`) at [aistudio.google.com/apikey](https://aistudio.google.com/apikey)."
+    )
     default_key = st.secrets.get("GEMINI_API_KEY", "")
     api_key = st.text_input(
         "Google Gemini API Key", value=default_key, type="password"
     ).strip()
+
+    if api_key and not api_key.startswith("AIza"):
+        st.error(
+            "That doesn't look like a Gemini key. OpenAI/ChatGPT keys (`sk-...`) and "
+            "other providers' keys won't work here — this app only calls the Gemini API."
+        )
+        st.stop()
+
     gen_model = st.selectbox("Generation model", GEN_MODELS, index=0)
 
     with st.expander("⚙️ Advanced settings"):
@@ -299,10 +315,22 @@ with st.sidebar:
                 st.session_state.index_store.pop(h, None)
             st.rerun()
 
-    if st.button("🗑️ Clear Vault", use_container_width=True):
-        st.session_state.index_store = {}
-        st.session_state.messages = []
-        st.rerun()
+    st.divider()
+    if st.session_state.get("confirm_clear_vault"):
+        st.warning("Remove all indexed documents and chat history? This can't be undone.")
+        cc1, cc2 = st.columns(2)
+        if cc1.button("Yes, clear everything", use_container_width=True):
+            st.session_state.index_store = {}
+            st.session_state.messages = []
+            st.session_state.confirm_clear_vault = False
+            st.rerun()
+        if cc2.button("Cancel", use_container_width=True):
+            st.session_state.confirm_clear_vault = False
+            st.rerun()
+    else:
+        if st.button("🗑️ Remove All Documents & Reset", use_container_width=True):
+            st.session_state.confirm_clear_vault = True
+            st.rerun()
 
 
 # --------------------------------------------------------------------------
@@ -324,6 +352,10 @@ if not chunks:
     st.stop()
 
 st.caption(f"📚 {len(set(c['file'] for c in chunks))} document(s) · {len(chunks)} indexed chunks")
+st.caption(
+    "🔒 This conversation only ever sees messages from *this* session — no memory "
+    "persists across browser sessions or leaks in from other users/clients."
+)
 
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
