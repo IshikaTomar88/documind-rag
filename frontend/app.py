@@ -24,9 +24,21 @@ st.markdown('<p class="main-title">💼 DocuMind Enterprise AI Workspace</p>', u
 st.markdown('<p class="sub-title">Upload client documents and chat naturally with full conversation history preserved.</p>', unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------
-# Sidebar: Credentials & Secure Document Vault
+# Initialize Chat History in Session State
+# ---------------------------------------------------------------------
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+# ---------------------------------------------------------------------
+# Sidebar: Credentials, New Chat Button & Document Vault
 # ---------------------------------------------------------------------
 with st.sidebar:
+    # ChatGPT / Gemini Style "New Chat" Action Button
+    if st.button("➕ New Chat", use_container_width=True):
+        st.session_state.messages = []
+        st.rerun()
+
+    st.markdown("---")
     st.header("🔑 Enterprise Configuration")
     
     # Pre-loaded with your specific key for seamless execution
@@ -66,12 +78,8 @@ with st.sidebar:
                 st.error(f"Error parsing {file.name}: {e}")
 
 # ---------------------------------------------------------------------
-# Initialize Chat History in Session State
+# Main Execution Space
 # ---------------------------------------------------------------------
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
-# Clear chat if documents are removed
 if not uploaded_files:
     st.info("👈 Upload client documents in the sidebar to start chatting with your intelligence engine.")
     st.session_state.messages = []
