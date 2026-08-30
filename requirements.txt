@@ -4,6 +4,7 @@ streamlit
 pypdf
 google-genai
 numpy
+sentence-transformers
 requests>=2.31.0
 chromadb>=0.5
 scikit-learn>=1.4
