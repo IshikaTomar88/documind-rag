@@ -13,14 +13,6 @@ Requirements:
 
 Run:
     streamlit run documind_app.py
-
-Set your key either in .streamlit/secrets.toml as GEMINI_API_KEY, or paste it
-into the sidebar at runtime. The key is only needed to ask questions — you can
-upload and index documents with no key at all.
-
-Note: the local embedding model (~130MB, quantized) downloads once on first
-run and is cached by fastembed afterward; that first run needs internet
-access, subsequent runs do not.
 """
 
 import hashlib
@@ -63,7 +55,7 @@ st.markdown(
 )
 
 LOCAL_EMBED_MODEL = "BAAI/bge-small-en-v1.5"
-GEN_MODELS = ["gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.7-flash", "gemini-3.5-flash"]
+GEN_MODELS = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"]
 
 # --------------------------------------------------------------------------
 # Session state
@@ -71,7 +63,6 @@ GEN_MODELS = ["gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.7-flash", "
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "index_store" not in st.session_state:
-    # hash -> {"name": str, "chunks": [dict], "vectors": np.ndarray}
     st.session_state.index_store = {}
 
 
@@ -135,9 +126,6 @@ def get_client(api_key: str):
 
 
 def embed_texts(texts, show_progress=True):
-    """Embeds locally via fastembed (ONNX runtime) — no API key, no PyTorch,
-    no network call after the first model download, document content never
-    leaves this machine for indexing. Returns (matrix, kept_indices, error)."""
     if not texts:
         return np.zeros((0, 1), dtype=np.float32), [], None
     try:
@@ -162,8 +150,6 @@ def cosine_topk(query_vec: np.ndarray, matrix: np.ndarray, chunks: list, k: int)
 
 
 def representative_sample(chunks: list, per_file: int = 4, max_total: int = 40):
-    """Broad, stratified sample across files/pages — used for summary-style
-    quick actions where narrow semantic similarity to the query is the wrong tool."""
     by_file = defaultdict(list)
     for c in chunks:
         by_file[c["file"]].append(c)
@@ -187,7 +173,6 @@ def build_context(pairs_or_chunks, with_scores=False):
 
 
 def active_corpus(active_hashes):
-    """Concatenate cached chunks/vectors for the files currently uploaded."""
     all_chunks, mats = [], []
     for h in active_hashes:
         entry = st.session_state.index_store.get(h)
@@ -204,19 +189,14 @@ SYSTEM_INSTRUCTION = (
     "You are DocuMind Enterprise, a precise document-reasoning assistant for corporate "
     "clients. You will be given CONTEXT CHUNKS pulled from the client's uploaded documents, "
     "each labeled with its source file (and page number, if it's a PDF). Rules:\n"
-    "1. Answer using ONLY the information in the context chunks below — do not use outside "
-    "knowledge.\n"
+    "1. Answer using ONLY the information in the context chunks below — do not use outside knowledge.\n"
     "2. After every factual claim, cite the source inline like (filename, p.X).\n"
-    "3. If the answer is not present in the context, say clearly that it was not found in "
-    "the indexed documents — do not guess.\n"
+    "3. If the answer is not present in the context, say clearly that it was not found in the indexed documents.\n"
     "4. Be concise and professional."
 )
 
 
 def generate_with_retry(client, gen_model, prompt, max_retries=3):
-    """Retries on transient server-side errors (model overloaded / rate limited).
-    Does NOT retry on permanent errors (bad model name, auth, permission) —
-    those won't fix themselves and retrying just wastes time."""
     last_error = None
     for attempt in range(max_retries):
         try:
@@ -261,51 +241,36 @@ def answer_broad(client, gen_model, instruction, chunks):
 
 
 # --------------------------------------------------------------------------
-# Sidebar
+# Sidebar Configuration
 # --------------------------------------------------------------------------
 with st.sidebar:
     if st.button("🆕 Start New Conversation", use_container_width=True):
         st.session_state.messages = []
         st.rerun()
-    st.caption(
-        "Clears the conversation completely — no earlier messages are reused. "
-        "Your indexed documents stay loaded, so there's no need to re-upload them."
-    )
 
     st.markdown("---")
-    st.header("🔑 Configuration (needed only to ask questions)")
-    st.caption(
-        "Documents are embedded **100% locally** on this machine — no API key needed, "
-        "and no document content is sent anywhere for indexing. A Gemini key is only "
-        "used for the final step: turning retrieved snippets into an answer."
-    )
-    default_key = st.secrets.get("GEMINI_API_KEY", "")
+    st.header("🔑 Configuration")
+    
+    # Safely load key from Streamlit secrets if configured, otherwise provide input box
+    default_key = ""
+    try:
+        default_key = st.secrets.get("GEMINI_API_KEY", "")
+    except Exception:
+        pass
+
     api_key = st.text_input(
-        "Google Gemini API Key (for generation only)", value=default_key, type="password",
+        "Google Gemini API Key", value=default_key, type="password",
         help="Get a free key at aistudio.google.com/apikey",
     ).strip()
 
     if api_key.startswith("sk-"):
         st.error(
-            "That looks like an OpenAI/ChatGPT key (`sk-...`), not a Gemini key — "
-            "this app only calls the Gemini API for answer generation. Get a Gemini "
-            "key at aistudio.google.com/apikey."
-        )
-        st.stop()
-
-    if api_key.startswith("sk-"):
-        st.error(
-            "That looks like an OpenAI/ChatGPT key (`sk-...`), not a Gemini key — "
-            "this app only calls the Gemini API. Get a Gemini key at aistudio.google.com/apikey."
+            "That looks like an OpenAI key (`sk-...`), not a Gemini key. "
+            "Get a Gemini key at aistudio.google.com/apikey."
         )
         st.stop()
 
     gen_model = st.selectbox("Generation model", GEN_MODELS, index=0)
-    st.caption(
-        "Model names shift as Google retires older ones — if you get a 404 saying a "
-        "model is unavailable, the error itself will name the current replacement; "
-        "swap it in here."
-    )
 
     with st.expander("⚙️ Advanced settings"):
         chunk_size = st.slider("Chunk size (characters)", 400, 2000, 900, 100)
@@ -330,7 +295,7 @@ with st.sidebar:
 
         if missing:
             for f, h in missing:
-                with st.spinner(f"Indexing {f.name} (local, no API call)..."):
+                with st.spinner(f"Indexing {f.name} locally..."):
                     chunks = build_chunks_for_file(f.name, f.getvalue(), chunk_size, overlap)
                     if not chunks:
                         st.error(f"No extractable text found in {f.name}.")
@@ -342,17 +307,11 @@ with st.sidebar:
                     st.error(f"❌ Local indexing failed for {f.name}.")
                     if err:
                         st.code(err, language=None)
-                        st.caption(
-                            "Hint: if this is the first run, the local embedding model "
-                            "(~90MB) may have failed to download — check internet access "
-                            "and that `fastembed` is installed."
-                        )
-                    # Don't cache a broken empty entry — let it retry next rerun.
                 else:
                     st.session_state.index_store[h] = {
                         "name": f.name, "chunks": chunks, "vectors": matrix,
                     }
-                    st.success(f"Indexed {f.name} — {len(chunks)} chunk(s) (local)")
+                    st.success(f"Indexed {f.name} — {len(chunks)} chunk(s)")
 
         st.caption("Currently indexed in this session:")
         for h in active_hashes:
@@ -360,50 +319,28 @@ with st.sidebar:
             if entry:
                 st.markdown(f"- **{entry['name']}** — {len(entry['chunks'])} chunks")
 
-        if st.button("🔁 Rebuild index with current settings", use_container_width=True):
-            for h in list(active_hashes):
-                st.session_state.index_store.pop(h, None)
-            st.rerun()
-
     st.divider()
-    if st.session_state.get("confirm_clear_vault"):
-        st.warning("Remove all indexed documents and chat history? This can't be undone.")
-        cc1, cc2 = st.columns(2)
-        if cc1.button("Yes, clear everything", use_container_width=True):
-            st.session_state.index_store = {}
-            st.session_state.messages = []
-            st.session_state.confirm_clear_vault = False
-            st.rerun()
-        if cc2.button("Cancel", use_container_width=True):
-            st.session_state.confirm_clear_vault = False
-            st.rerun()
-    else:
-        if st.button("🗑️ Remove All Documents & Reset", use_container_width=True):
-            st.session_state.confirm_clear_vault = True
-            st.rerun()
+    if st.button("🗑️ Remove All Documents & Reset", use_container_width=True):
+        st.session_state.index_store = {}
+        st.session_state.messages = []
+        st.rerun()
 
 
 # --------------------------------------------------------------------------
-# Main area
+# Main area execution
 # --------------------------------------------------------------------------
 if not uploaded_files:
-    st.info("👈 Upload client documents in the sidebar to activate the DocuMind intelligence engine.")
+    st.info("👈 Upload client documents in the sidebar to activate the DocuMind engine.")
     st.stop()
 
 chunks, matrix = active_corpus(active_hashes)
 
 if not chunks:
-    st.info("Indexing in progress or no text could be extracted yet — check the sidebar.")
+    st.info("Indexing in progress or no text could be extracted yet.")
     st.stop()
 
-st.caption(f"📚 {len(set(c['file'] for c in chunks))} document(s) · {len(chunks)} indexed chunks (embedded locally)")
-st.caption(
-    "🔒 This conversation only ever sees messages from *this* session — no memory "
-    "persists across browser sessions or leaks in from other users/clients."
-)
-
 if not api_key:
-    st.warning("⚠️ Your documents are indexed and ready. Add your Gemini API key in the sidebar to start asking questions.")
+    st.warning("⚠️ Documents are indexed locally. Please enter your Gemini API key in the sidebar to ask questions.")
     st.stop()
 
 client = get_client(api_key)
@@ -417,43 +354,34 @@ for message in st.session_state.messages:
                     label = format_source(c)
                     score_txt = f" · similarity {score:.2f}" if score is not None else ""
                     st.markdown(f"<span class='src-chip'>{label}{score_txt}</span>", unsafe_allow_html=True)
-                    st.caption(c["text"][:300] + ("…" if len(c["text"]) > 300 else ""))
 
 st.markdown("##### ⚡ Executive Quick Actions")
 col1, col2, col3 = st.columns(3)
 quick_prompt, quick_mode = None, None
 with col1:
     if st.button("📝 Executive Summary", use_container_width=True):
-        quick_prompt = "Provide a comprehensive executive summary of the uploaded documents, highlighting core objectives and key takeaways."
+        quick_prompt = "Provide a comprehensive executive summary of the uploaded documents."
         quick_mode = "broad"
 with col2:
-    if st.button("⚠️ Risk & Liability Analysis", use_container_width=True):
-        quick_prompt = "Analyze the documents for potential risks, liabilities, or critical clauses. List them clearly with recommendations."
+    if st.button("⚠️ Risk Analysis", use_container_width=True):
+        quick_prompt = "Analyze the documents for potential risks, liabilities, or critical clauses."
         quick_mode = "broad"
 with col3:
     if st.button("📅 Dates & Action Items", use_container_width=True):
-        quick_prompt = "Extract all critical deadlines, dates, financial figures, and action items mentioned in the documents."
+        quick_prompt = "Extract all critical deadlines, dates, and action items mentioned."
         quick_mode = "broad"
 
 user_query = st.chat_input("Ask anything about your documents...")
-retry_prompt = st.session_state.pop("retry_prompt", None)
-retry_mode = st.session_state.pop("retry_mode", None)
-
-if retry_prompt:
-    active_prompt, mode, is_retry = retry_prompt, retry_mode, True
-else:
-    active_prompt = user_query if user_query else quick_prompt
-    mode = "freeform" if user_query else quick_mode
-    is_retry = False
+active_prompt = user_query if user_query else quick_prompt
+mode = "freeform" if user_query else quick_mode
 
 if active_prompt:
-    if not is_retry:
-        st.session_state.messages.append({"role": "user", "content": active_prompt})
-        with st.chat_message("user"):
-            st.markdown(active_prompt)
+    st.session_state.messages.append({"role": "user", "content": active_prompt})
+    with st.chat_message("user"):
+        st.markdown(active_prompt)
 
     with st.chat_message("assistant"):
-        with st.spinner(f"Analyzing document corpus with {gen_model}..."):
+        with st.spinner(f"Analyzing with {gen_model}..."):
             try:
                 if mode == "broad":
                     output_text, sources = answer_broad(client, gen_model, active_prompt, chunks)
@@ -472,20 +400,9 @@ if active_prompt:
                             label = format_source(c)
                             score_txt = f" · similarity {score:.2f}" if score is not None else ""
                             st.markdown(f"<span class='src-chip'>{label}{score_txt}</span>", unsafe_allow_html=True)
-                            st.caption(c["text"][:300] + ("…" if len(c["text"]) > 300 else ""))
 
                 st.session_state.messages.append(
                     {"role": "assistant", "content": output_text, "sources": sources}
                 )
             except Exception as e:
-                msg = str(e)
-                if "503" in msg or "UNAVAILABLE" in msg:
-                    st.warning("⏳ Gemini is temporarily overloaded (503) on Google's side. This usually clears within a minute or two — your question wasn't lost.")
-                elif "429" in msg or "RESOURCE_EXHAUSTED" in msg:
-                    st.warning("⏳ Rate limit or quota hit (429). Wait a bit before retrying — your question wasn't lost.")
-                else:
-                    st.error(f"Execution failed: {msg}")
-                if st.button("🔄 Retry this question", key=f"retry_btn_{len(st.session_state.messages)}"):
-                    st.session_state.retry_prompt = active_prompt
-                    st.session_state.retry_mode = mode
-                    st.rerun()
+                st.error(f"Execution failed: {str(e)}")
